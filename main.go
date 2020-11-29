@@ -15,21 +15,25 @@ import (
 const PrivKeyLocation string = "/Users/cernec1999/.ssh/id_rsa"
 
 // RemoteUsername is the username of the remote server
-//const RemoteUsername string = "dev"
-const RemoteUsername string = "ssmp"
+const RemoteUsername string = "dev"
 
 // RemotePassword is the remote's password
-//const RemotePassword string = "j.#dM#N<`w>Ehv8:7\"4X8cpy\"f)2X5"
-const RemotePassword string = "&qWKKa$Lb*okfwtzhm8fGa2H&"
+const RemotePassword string = "j.#dM#N<`w>Ehv8:7\"4X8cpy\"f)2X5"
 
 // RemoteAddr describes the remote server to connect to
-const RemoteAddr string = "dadb0d.commentblock.com:22"
+const RemoteAddr string = "127.0.0.1:1234"
 
 // ServerAddr is the address and port to bind to
-const ServerAddr string = ":1337"
+const ServerAddr string = ":22"
 
 // Dbg is if we are in debug mode
 const Dbg bool = true
+
+// PasswordData represents metadata about the password
+type PasswordData struct {
+	acceptedPassword string
+	attempts         uint8
+}
 
 // Creates a connection to the remote SSH server
 func dialSSHClient() (*ssh.Client, error) {
@@ -50,7 +54,7 @@ func dialSSHClient() (*ssh.Client, error) {
 }
 
 // Serve a single SSH connection
-func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig) error {
+func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwords map[net.Addr]PasswordData) error {
 	serverConnection, serverChannels, serverRequests, err := ssh.NewServerConn(connection, sshConfig)
 
 	if err != nil {
@@ -69,8 +73,14 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig) error 
 		return err
 	}
 
+	pwdData := passwords[serverConnection.Conn.RemoteAddr()]
+
+	// Create SQL connection
+	sqlConn := NewSQLHoneypotDBConnection(serverConnection.Conn.RemoteAddr().String(), "unk", serverConnection.Conn.User(), pwdData.acceptedPassword, pwdData.attempts)
+
 	// Close client connection on exit
 	defer clientConnection.Close()
+	defer sqlConn.Close()
 
 	go ssh.DiscardRequests(serverRequests)
 
@@ -130,7 +140,7 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig) error 
 		}()
 
 		var wrappedServerChannel io.ReadCloser = serverChannel
-		var wrappedClientChannel io.ReadCloser = NewSQLReadCloser(clientChannel)
+		var wrappedClientChannel io.ReadCloser = NewSQLReadCloser(clientChannel, sqlConn)
 
 		go io.Copy(clientChannel, wrappedServerChannel)
 		go io.Copy(serverChannel, wrappedClientChannel)
@@ -160,6 +170,7 @@ func main() {
 	}
 
 	// Create a map for all the clients
+	passwords := make(map[net.Addr]PasswordData)
 
 	// Configure ssh server
 	config := &ssh.ServerConfig{
@@ -168,6 +179,13 @@ func main() {
 			debugPrint(fmt.Sprintf("SSH Connection from %s.", connMeta.RemoteAddr()))
 			debugPrint(fmt.Sprintf("Username: %s", connMeta.User()))
 			debugPrint(fmt.Sprintf("Password: %s", string(password)))
+
+			pwdData := PasswordData{
+				acceptedPassword: string(password),
+				attempts:         1,
+			}
+
+			passwords[connMeta.RemoteAddr()] = pwdData
 
 			return nil, nil
 		},
@@ -194,7 +212,7 @@ func main() {
 			continue
 		}
 
-		go serveSSHConnection(currentConnection, config)
+		go serveSSHConnection(currentConnection, config, passwords)
 	}
 }
 
