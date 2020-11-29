@@ -1,10 +1,12 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net"
 
 	"golang.org/x/crypto/ssh"
@@ -15,13 +17,16 @@ import (
 const PrivKeyLocation string = "/Users/cernec1999/.ssh/id_rsa"
 
 // RemoteUsername is the username of the remote server
-const RemoteUsername string = "dev"
+// const RemoteUsername string = "dev"
+const RemoteUsername string = "ssmp"
 
 // RemotePassword is the remote's password
-const RemotePassword string = "j.#dM#N<`w>Ehv8:7\"4X8cpy\"f)2X5"
+// const RemotePassword string = "j.#dM#N<`w>Ehv8:7\"4X8cpy\"f)2X5"
+const RemotePassword string = "&qWKKa$Lb*okfwtzhm8fGa2H&"
 
 // RemoteAddr describes the remote server to connect to
-const RemoteAddr string = "127.0.0.1:1234"
+// const RemoteAddr string = "127.0.0.1:1234"
+const RemoteAddr string = "dadb0d.commentblock.com:22"
 
 // ServerAddr is the address and port to bind to
 const ServerAddr string = ":22"
@@ -31,8 +36,8 @@ const Dbg bool = true
 
 // PasswordData represents metadata about the password
 type PasswordData struct {
-	acceptedPassword string
-	attempts         uint8
+	lastAttemptedPassword string
+	attempts              uint8
 }
 
 // Creates a connection to the remote SSH server
@@ -73,10 +78,14 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 		return err
 	}
 
+	// Get the password data for that connection
 	pwdData := passwords[serverConnection.Conn.RemoteAddr()]
 
 	// Create SQL connection
-	sqlConn := NewSQLHoneypotDBConnection(serverConnection.Conn.RemoteAddr().String(), "unk", serverConnection.Conn.User(), pwdData.acceptedPassword, pwdData.attempts)
+	sqlConn := NewSQLHoneypotDBConnection(serverConnection.Conn.RemoteAddr().String(), "unk", serverConnection.Conn.User(), pwdData.lastAttemptedPassword, pwdData.attempts)
+
+	// Remove old password data
+	delete(passwords, serverConnection.Conn.RemoteAddr())
 
 	// Close client connection on exit
 	defer clientConnection.Close()
@@ -176,18 +185,41 @@ func main() {
 	config := &ssh.ServerConfig{
 		PasswordCallback: func(connMeta ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
 
-			debugPrint(fmt.Sprintf("SSH Connection from %s.", connMeta.RemoteAddr()))
+			debugPrint(fmt.Sprintf("SSH password attempt from %s.", connMeta.RemoteAddr()))
 			debugPrint(fmt.Sprintf("Username: %s", connMeta.User()))
 			debugPrint(fmt.Sprintf("Password: %s", string(password)))
 
-			pwdData := PasswordData{
-				acceptedPassword: string(password),
-				attempts:         1,
+			// See if we let them in
+			succeed := rand.Intn(3) == 0
+
+			// If we've seen this connection before
+			if _, ok := passwords[connMeta.RemoteAddr()]; !ok {
+				passwords[connMeta.RemoteAddr()] = PasswordData{
+					lastAttemptedPassword: string(password),
+					attempts:              1,
+				}
+
+				if succeed {
+					return nil, nil
+				}
+			} else if passwords[connMeta.RemoteAddr()].attempts == 3 {
+				passwords[connMeta.RemoteAddr()] = PasswordData{
+					lastAttemptedPassword: string(password),
+					attempts:              3,
+				}
+				return nil, nil
+			} else {
+				passwords[connMeta.RemoteAddr()] = PasswordData{
+					lastAttemptedPassword: string(password),
+					attempts:              passwords[connMeta.RemoteAddr()].attempts + 1,
+				}
+
+				if succeed {
+					return nil, nil
+				}
 			}
 
-			passwords[connMeta.RemoteAddr()] = pwdData
-
-			return nil, nil
+			return nil, errors.New("Incorrect SSH password")
 		},
 	}
 
