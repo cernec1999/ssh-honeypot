@@ -73,8 +73,7 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 	// Proxy the SSH request by dialing a new ssh client
 	clientConnection, err := dialSSHClient()
 	if err != nil {
-		debugPrint("Could not dial SSH client")
-		fmt.Printf("%v\n", err)
+		debugPrint(fmt.Sprintf("Could not dial SSH client: %v", err))
 		return err
 	}
 
