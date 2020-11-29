@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -10,33 +9,6 @@ import (
 
 	"golang.org/x/crypto/ssh"
 )
-
-// NewSQLReadCloser creates a new SqlReadCloser struct
-func NewSQLReadCloser(r io.ReadCloser) io.ReadCloser {
-	return &SQLReadCloser{ReadCloser: r}
-}
-
-// SQLReadCloser type to export into a DB
-type SQLReadCloser struct {
-	io.ReadCloser
-	buffer bytes.Buffer
-}
-
-func (sq *SQLReadCloser) Read(p []byte) (n int, err error) {
-	n, err = sq.ReadCloser.Read(p)
-	sq.buffer.Write(p)
-	return n, err
-}
-
-func (sq *SQLReadCloser) String() string {
-	return sq.buffer.String()
-}
-
-// Close the connection
-func (sq *SQLReadCloser) Close() error {
-	fmt.Println(sq.buffer.String())
-	return sq.ReadCloser.Close()
-}
 
 // PrivKeyLocation is the location of the private key to be used
 // in the ssh server
@@ -50,6 +22,7 @@ const RemoteUsername string = "ssmp"
 //const RemotePassword string = "j.#dM#N<`w>Ehv8:7\"4X8cpy\"f)2X5"
 const RemotePassword string = "&qWKKa$Lb*okfwtzhm8fGa2H&"
 
+// RemoteAddr describes the remote server to connect to
 const RemoteAddr string = "dadb0d.commentblock.com:22"
 
 // ServerAddr is the address and port to bind to
@@ -58,6 +31,7 @@ const ServerAddr string = ":1337"
 // Dbg is if we are in debug mode
 const Dbg bool = true
 
+// Creates a connection to the remote SSH server
 func dialSSHClient() (*ssh.Client, error) {
 	// Configure an ssh client
 	clientConfig := &ssh.ClientConfig{}
@@ -75,6 +49,7 @@ func dialSSHClient() (*ssh.Client, error) {
 	return client, err
 }
 
+// Serve a single SSH connection
 func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig) error {
 	serverConnection, serverChannels, serverRequests, err := ssh.NewServerConn(connection, sshConfig)
 
@@ -99,6 +74,7 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig) error 
 
 	go ssh.DiscardRequests(serverRequests)
 
+	// Iterate through all the channels (is there just one?)
 	for newChannel := range serverChannels {
 		// Create client connection
 		clientChannel, clientRequests, err := clientConnection.OpenChannel(newChannel.ChannelType(), newChannel.ExtraData())
@@ -117,8 +93,8 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig) error 
 		go func() {
 		threadLoop:
 			for {
-				var req *ssh.Request
-				var dst ssh.Channel
+				var req *ssh.Request = nil
+				var dst ssh.Channel = nil
 
 				select {
 				case req = <-serverRequests:
@@ -127,10 +103,16 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig) error 
 					dst = serverChannel
 				}
 
-				// TODO: Fix segfault here. Nil check for dst?
+				// Resolve segmentation fault for unexpected closed connection
+				if dst == nil || req == nil {
+					debugPrint("Client closed connection unexpectedly")
+					return
+				}
+
 				b, err := dst.SendRequest(req.Type, req.WantReply, req.Payload)
 				if err != nil {
 					debugPrint(fmt.Sprintf("Request sending did not work %s", err))
+					return
 				}
 
 				if req.WantReply {
@@ -141,17 +123,14 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig) error 
 					break threadLoop
 				}
 			}
+
+			// Finally, close the connections
 			serverChannel.Close()
 			clientChannel.Close()
 		}()
 
 		var wrappedServerChannel io.ReadCloser = serverChannel
 		var wrappedClientChannel io.ReadCloser = NewSQLReadCloser(clientChannel)
-
-		/*if p.wrapFn != nil {
-			// wrappedChannel, err = p.wrapFn(channel)
-			// wrappedClientChannel, err = p.wrapFn(serverConnection, channel2)
-		}*/
 
 		go io.Copy(clientChannel, wrappedServerChannel)
 		go io.Copy(serverChannel, wrappedClientChannel)
@@ -211,10 +190,11 @@ func main() {
 		currentConnection, err := listener.Accept()
 
 		if err != nil {
-			panic(fmt.Sprintf("listener.Accept failed: %v", err))
+			debugPrint(fmt.Sprintf("listener.Accept failed: %v", err))
+			continue
 		}
 
-		serveSSHConnection(currentConnection, config)
+		go serveSSHConnection(currentConnection, config)
 	}
 }
 
