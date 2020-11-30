@@ -14,7 +14,8 @@ const createConnectionsTable string = `
 CREATE TABLE IF NOT EXISTS connections (
 	id integer PRIMARY KEY AUTOINCREMENT,
     time DATETIME DEFAULT CURRENT_TIMESTAMP,
-  	source_ip TEXT NOT NULL,
+	source_ip TEXT NOT NULL,
+	source_port integer NOT NULL,
   	country_code TEXT NOT NULL,
   	username TEXT,
 	password TEXT,
@@ -32,11 +33,12 @@ CREATE TABLE IF NOT EXISTS metadata (
 const insertConnection string = `
 INSERT INTO connections (
 	source_ip,
+	source_port,
 	country_code,
 	username,
 	password,
 	attempts
-) VALUES (?, ?, ?, ?, ?)`
+) VALUES (?, ?, ?, ?, ?, ?)`
 
 const insertMetadata string = `
 INSERT INTO metadata (
@@ -52,7 +54,7 @@ type SQLHoneypotDBConnection struct {
 }
 
 // NewSQLHoneypotDBConnection creates a new DB connection for one client
-func NewSQLHoneypotDBConnection(sourceIP string, countryCode string, username string, password string, attempts uint8) SQLHoneypotDBConnection {
+func NewSQLHoneypotDBConnection(sourceIP string, sourcePort uint16, countryCode string, username string, password string, attempts uint8) SQLHoneypotDBConnection {
 	connection := SQLHoneypotDBConnection{
 		database: nil,
 		connID:   0,
@@ -66,7 +68,7 @@ func NewSQLHoneypotDBConnection(sourceIP string, countryCode string, username st
 	}
 
 	// Add to the connections table
-	err = connection.insertInitialConnection(sourceIP, countryCode, username, password, attempts)
+	err = connection.insertInitialConnection(sourceIP, sourcePort, countryCode, username, password, attempts)
 
 	if err != nil {
 		debugPrint(fmt.Sprintf("Unable to insert initial connection: %s", err))
@@ -167,7 +169,7 @@ func (sq *SQLHoneypotDBConnection) InsertMetadata(bytes []byte) error {
 	return nil
 }
 
-func (sq *SQLHoneypotDBConnection) insertInitialConnection(sourceIP string, countryCode string, username string, password string, attempts uint8) error {
+func (sq *SQLHoneypotDBConnection) insertInitialConnection(sourceIP string, sourcePort uint16, countryCode string, username string, password string, attempts uint8) error {
 	if sq.database == nil {
 		return errors.New("database does not exist")
 	}
@@ -178,7 +180,7 @@ func (sq *SQLHoneypotDBConnection) insertInitialConnection(sourceIP string, coun
 		return err
 	}
 
-	_, err = statement.Exec(sourceIP, countryCode, username, password, attempts)
+	_, err = statement.Exec(sourceIP, sourcePort, countryCode, username, password, attempts)
 
 	if err != nil {
 		return err

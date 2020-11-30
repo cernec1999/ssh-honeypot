@@ -8,6 +8,8 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"strconv"
+	"strings"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -80,8 +82,12 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 	// Get the password data for that connection
 	pwdData := passwords[serverConnection.Conn.RemoteAddr()]
 
+	// Split address
+	addrStrSplit := strings.Split(serverConnection.Conn.RemoteAddr().String(), ":")
+	port, err := strconv.ParseUint(addrStrSplit[1], 10, 16)
+
 	// Create SQL connection
-	sqlConn := NewSQLHoneypotDBConnection(serverConnection.Conn.RemoteAddr().String(), "unk", serverConnection.Conn.User(), pwdData.lastAttemptedPassword, pwdData.attempts)
+	sqlConn := NewSQLHoneypotDBConnection(addrStrSplit[0], uint16(port), "unk", serverConnection.Conn.User(), pwdData.lastAttemptedPassword, pwdData.attempts)
 
 	// Remove old password data
 	delete(passwords, serverConnection.Conn.RemoteAddr())
@@ -201,7 +207,7 @@ func main() {
 				if succeed {
 					return nil, nil
 				}
-			} else if passwords[connMeta.RemoteAddr()].attempts == 3 {
+			} else if passwords[connMeta.RemoteAddr()].attempts == 2 {
 				passwords[connMeta.RemoteAddr()] = PasswordData{
 					lastAttemptedPassword: string(password),
 					attempts:              3,
