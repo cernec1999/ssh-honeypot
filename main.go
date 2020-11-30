@@ -9,7 +9,6 @@ import (
 	"math/rand"
 	"net"
 	"strconv"
-	"strings"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -19,19 +18,19 @@ import (
 const PrivKeyLocation string = "/Users/cernec1999/.ssh/id_rsa"
 
 // RemoteUsername is the username of the remote server
-const RemoteUsername string = "dev"
+//const RemoteUsername string = "dev"
 
-//const RemoteUsername string = "ssmp"
+const RemoteUsername string = "ssmp"
 
 // RemotePassword is the remote's password
-const RemotePassword string = "j.#dM#N<`w>Ehv8:7\"4X8cpy\"f)2X5"
+//const RemotePassword string = "j.#dM#N<`w>Ehv8:7\"4X8cpy\"f)2X5"
 
-//const RemotePassword string = "&qWKKa$Lb*okfwtzhm8fGa2H&"
+const RemotePassword string = "&qWKKa$Lb*okfwtzhm8fGa2H&"
 
 // RemoteAddr describes the remote server to connect to
-const RemoteAddr string = "127.0.0.1:1234"
+//const RemoteAddr string = "127.0.0.1:1234"
 
-//const RemoteAddr string = "dadb0d.commentblock.com:22"
+const RemoteAddr string = "dadb0d.commentblock.com:22"
 
 // ServerAddr is the address and port to bind to
 const ServerAddr string = "0.0.0.0:22"
@@ -39,10 +38,16 @@ const ServerAddr string = "0.0.0.0:22"
 // Dbg is if we are in debug mode
 const Dbg bool = true
 
-// PasswordData represents metadata about the password
-type PasswordData struct {
-	lastAttemptedPassword string
-	attempts              uint8
+// PasswordAttemptData represents metadata about password attempts
+type PasswordAttemptData struct {
+	usernamePasswords []UsernamePassword
+	numAttempts       uint8
+}
+
+// UsernamePassword has a specific attempt information
+type UsernamePassword struct {
+	username string
+	password string
 }
 
 // Creates a connection to the remote SSH server
@@ -64,7 +69,7 @@ func dialSSHClient() (*ssh.Client, error) {
 }
 
 // Serve a single SSH connection
-func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwords map[net.Addr]PasswordData) error {
+func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwords map[net.Addr]PasswordAttemptData) error {
 	serverConnection, serverChannels, serverRequests, err := ssh.NewServerConn(connection, sshConfig)
 
 	if err != nil {
@@ -86,11 +91,22 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 	pwdData := passwords[serverConnection.Conn.RemoteAddr()]
 
 	// Split address
-	addrStrSplit := strings.Split(serverConnection.Conn.RemoteAddr().String(), ":")
-	port, err := strconv.ParseUint(addrStrSplit[1], 10, 16)
+	host, strPort, err := net.SplitHostPort(serverConnection.Conn.RemoteAddr().String())
+
+	if err != nil {
+		debugPrint(fmt.Sprintf("Could not split host and port: %v", err))
+		return err
+	}
+
+	port, err := strconv.ParseUint(strPort, 10, 16)
+
+	if err != nil {
+		debugPrint(fmt.Sprintf("Could not parse port as an integer: %v", err))
+		return err
+	}
 
 	// Create SQL connection
-	sqlConn := NewSQLHoneypotDBConnection(addrStrSplit[0], uint16(port), "unk", serverConnection.Conn.User(), pwdData.lastAttemptedPassword, pwdData.attempts)
+	sqlConn := NewSQLHoneypotDBConnection(host, uint16(port), "unk", pwdData)
 
 	// Remove old password data
 	delete(passwords, serverConnection.Conn.RemoteAddr())
@@ -187,7 +203,7 @@ func main() {
 	}
 
 	// Create a map for all the clients
-	passwords := make(map[net.Addr]PasswordData)
+	passwords := make(map[net.Addr]PasswordAttemptData)
 
 	// Configure ssh server
 	config := &ssh.ServerConfig{
@@ -200,28 +216,54 @@ func main() {
 			// See if we let them in
 			succeed := rand.Intn(3) == 0
 
-			// If we've seen this connection before
+			// If we've not seen this connection before
 			if _, ok := passwords[connMeta.RemoteAddr()]; !ok {
-				passwords[connMeta.RemoteAddr()] = PasswordData{
-					lastAttemptedPassword: string(password),
-					attempts:              1,
+				attemptsList := []UsernamePassword{}
+
+				attemptsList = append(attemptsList, UsernamePassword{
+					username: connMeta.User(),
+					password: string(password),
+				})
+
+				passwords[connMeta.RemoteAddr()] = PasswordAttemptData{
+					usernamePasswords: attemptsList,
+					numAttempts:       1,
 				}
 
 				if succeed {
 					return nil, nil
 				}
-			} else if passwords[connMeta.RemoteAddr()].attempts == 2 {
-				passwords[connMeta.RemoteAddr()] = PasswordData{
-					lastAttemptedPassword: string(password),
-					attempts:              3,
-				}
-				return nil, nil
-			} else {
-				passwords[connMeta.RemoteAddr()] = PasswordData{
-					lastAttemptedPassword: string(password),
-					attempts:              passwords[connMeta.RemoteAddr()].attempts + 1,
+			} else if passwords[connMeta.RemoteAddr()].numAttempts == 2 {
+				// Get password list and append to it
+				pwdList := passwords[connMeta.RemoteAddr()].usernamePasswords
+				pwdList = append(pwdList, UsernamePassword{
+					username: connMeta.User(),
+					password: string(password),
+				})
+
+				// append password attempt
+				passwords[connMeta.RemoteAddr()] = PasswordAttemptData{
+					usernamePasswords: pwdList,
+					numAttempts:       3,
 				}
 
+				// Success
+				return nil, nil
+			} else {
+				// Get password list and append to it
+				pwdList := passwords[connMeta.RemoteAddr()].usernamePasswords
+				pwdList = append(pwdList, UsernamePassword{
+					username: connMeta.User(),
+					password: string(password),
+				})
+
+				// append password attempt
+				passwords[connMeta.RemoteAddr()] = PasswordAttemptData{
+					usernamePasswords: pwdList,
+					numAttempts:       passwords[connMeta.RemoteAddr()].numAttempts + 1,
+				}
+
+				// we succeed
 				if succeed {
 					return nil, nil
 				}

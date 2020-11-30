@@ -17,8 +17,6 @@ CREATE TABLE IF NOT EXISTS connections (
 	source_ip TEXT NOT NULL,
 	source_port integer NOT NULL,
   	country_code TEXT NOT NULL,
-  	username TEXT,
-	password TEXT,
 	attempts integer
 );`
 
@@ -30,15 +28,27 @@ CREATE TABLE IF NOT EXISTS metadata (
 );
 `
 
+const createPasswordsAttemptsTable string = `
+CREATE TABLE IF NOT EXISTS attempts (
+	id integer NOT NULL,
+	username TEXT,
+	password TEXT
+);`
+
 const insertConnection string = `
 INSERT INTO connections (
 	source_ip,
 	source_port,
 	country_code,
-	username,
-	password,
 	attempts
-) VALUES (?, ?, ?, ?, ?, ?)`
+) VALUES (?, ?, ?, ?)`
+
+const insertAttempt string = `
+INSERT INTO attempts (
+	id,
+	username,
+	password
+) VALUES (?, ?, ?)`
 
 const insertMetadata string = `
 INSERT INTO metadata (
@@ -54,7 +64,7 @@ type SQLHoneypotDBConnection struct {
 }
 
 // NewSQLHoneypotDBConnection creates a new DB connection for one client
-func NewSQLHoneypotDBConnection(sourceIP string, sourcePort uint16, countryCode string, username string, password string, attempts uint8) SQLHoneypotDBConnection {
+func NewSQLHoneypotDBConnection(sourceIP string, sourcePort uint16, countryCode string, pwdData PasswordAttemptData) SQLHoneypotDBConnection {
 	connection := SQLHoneypotDBConnection{
 		database: nil,
 		connID:   0,
@@ -68,7 +78,7 @@ func NewSQLHoneypotDBConnection(sourceIP string, sourcePort uint16, countryCode 
 	}
 
 	// Add to the connections table
-	err = connection.insertInitialConnection(sourceIP, sourcePort, countryCode, username, password, attempts)
+	err = connection.insertInitialConnection(sourceIP, sourcePort, countryCode, pwdData)
 
 	if err != nil {
 		debugPrint(fmt.Sprintf("Unable to insert initial connection: %s", err))
@@ -131,6 +141,22 @@ func (sq *SQLHoneypotDBConnection) createTablesIfNotExists() error {
 		return err
 	}
 
+	// Create the attempts table
+	statement, err = sq.database.Prepare(createPasswordsAttemptsTable)
+
+	// An error has occurred
+	if err != nil {
+		return err
+	}
+
+	// Execute statement
+	_, err = statement.Exec()
+
+	// An error has occurred
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -169,7 +195,7 @@ func (sq *SQLHoneypotDBConnection) InsertMetadata(bytes []byte) error {
 	return nil
 }
 
-func (sq *SQLHoneypotDBConnection) insertInitialConnection(sourceIP string, sourcePort uint16, countryCode string, username string, password string, attempts uint8) error {
+func (sq *SQLHoneypotDBConnection) insertInitialConnection(sourceIP string, sourcePort uint16, countryCode string, pwdData PasswordAttemptData) error {
 	if sq.database == nil {
 		return errors.New("database does not exist")
 	}
@@ -180,7 +206,7 @@ func (sq *SQLHoneypotDBConnection) insertInitialConnection(sourceIP string, sour
 		return err
 	}
 
-	_, err = statement.Exec(sourceIP, sourcePort, countryCode, username, password, attempts)
+	_, err = statement.Exec(sourceIP, sourcePort, countryCode, pwdData.numAttempts)
 
 	if err != nil {
 		return err
@@ -198,6 +224,21 @@ func (sq *SQLHoneypotDBConnection) insertInitialConnection(sourceIP string, sour
 
 	if err != nil {
 		return err
+	}
+
+	// Finally insert the password attempt data
+	for _, elem := range pwdData.usernamePasswords {
+		statement, err = sq.database.Prepare(insertAttempt)
+
+		if err != nil {
+			return err
+		}
+
+		_, err = statement.Exec(sq.connID, elem.username, elem.password)
+
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
