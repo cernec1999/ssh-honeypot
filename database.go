@@ -16,7 +16,9 @@ CREATE TABLE IF NOT EXISTS connections (
     time DATETIME DEFAULT CURRENT_TIMESTAMP,
 	source_ip TEXT NOT NULL,
 	source_port integer NOT NULL,
-  	country_code TEXT NOT NULL,
+	continent TEXT NOT NULL,
+	country TEXT NOT NULL,
+	city TEXT NOT NULL,
 	attempts integer
 );`
 
@@ -39,9 +41,11 @@ const insertConnection string = `
 INSERT INTO connections (
 	source_ip,
 	source_port,
-	country_code,
+	continent,
+	country,
+	city,
 	attempts
-) VALUES (?, ?, ?, ?)`
+) VALUES (?, ?, ?, ?, ?, ?)`
 
 const insertAttempt string = `
 INSERT INTO attempts (
@@ -64,7 +68,7 @@ type SQLHoneypotDBConnection struct {
 }
 
 // NewSQLHoneypotDBConnection creates a new DB connection for one client
-func NewSQLHoneypotDBConnection(sourceIP string, sourcePort uint16, countryCode string, pwdData PasswordAttemptData) SQLHoneypotDBConnection {
+func NewSQLHoneypotDBConnection(sourceIP string, sourcePort uint16, geoData GeoData, pwdData PasswordAttemptData) SQLHoneypotDBConnection {
 	connection := SQLHoneypotDBConnection{
 		database: nil,
 		connID:   0,
@@ -78,7 +82,7 @@ func NewSQLHoneypotDBConnection(sourceIP string, sourcePort uint16, countryCode 
 	}
 
 	// Add to the connections table
-	err = connection.insertInitialConnection(sourceIP, sourcePort, countryCode, pwdData)
+	err = connection.insertInitialConnection(sourceIP, sourcePort, geoData, pwdData)
 
 	if err != nil {
 		debugPrint(fmt.Sprintf("Unable to insert initial connection: %s", err))
@@ -195,7 +199,7 @@ func (sq *SQLHoneypotDBConnection) InsertMetadata(bytes []byte) error {
 	return nil
 }
 
-func (sq *SQLHoneypotDBConnection) insertInitialConnection(sourceIP string, sourcePort uint16, countryCode string, pwdData PasswordAttemptData) error {
+func (sq *SQLHoneypotDBConnection) insertInitialConnection(sourceIP string, sourcePort uint16, geoData GeoData, pwdData PasswordAttemptData) error {
 	if sq.database == nil {
 		return errors.New("database does not exist")
 	}
@@ -206,7 +210,7 @@ func (sq *SQLHoneypotDBConnection) insertInitialConnection(sourceIP string, sour
 		return err
 	}
 
-	_, err = statement.Exec(sourceIP, sourcePort, countryCode, pwdData.numAttempts)
+	_, err = statement.Exec(sourceIP, sourcePort, geoData.ContinentCode, geoData.CountryCode, geoData.City, pwdData.numAttempts)
 
 	if err != nil {
 		return err

@@ -105,8 +105,10 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 		return err
 	}
 
+	geoData := GetGeoData(host)
+
 	// Create SQL connection
-	sqlConn := NewSQLHoneypotDBConnection(host, uint16(port), "unk", pwdData)
+	sqlConn := NewSQLHoneypotDBConnection(host, uint16(port), geoData, pwdData)
 
 	// Remove old password data
 	delete(passwords, serverConnection.Conn.RemoteAddr())
