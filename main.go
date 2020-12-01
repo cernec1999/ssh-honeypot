@@ -20,17 +20,11 @@ const PrivKeyLocation string = "/Users/cernec1999/.ssh/id_rsa"
 // RemoteUsername is the username of the remote server
 const RemoteUsername string = "dev"
 
-//const RemoteUsername string = "ssmp"
-
 // RemotePassword is the remote's password
 const RemotePassword string = "j.#dM#N<`w>Ehv8:7\"4X8cpy\"f)2X5"
 
-//const RemotePassword string = "&qWKKa$Lb*okfwtzhm8fGa2H&"
-
 // RemoteAddr describes the remote server to connect to
 const RemoteAddr string = "127.0.0.1:1234"
-
-//const RemoteAddr string = "dadb0d.commentblock.com:22"
 
 // ServerAddr is the address and port to bind to
 const ServerAddr string = "0.0.0.0:22"
