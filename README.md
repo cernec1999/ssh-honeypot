@@ -7,6 +7,7 @@ The point of this project is to detect bots attempting to brute force username a
 
 # Installing dependencies
 To install the Golang dependencies, you can simply run the following command.
+
 ```$ go get -d .```
 
 # Building
