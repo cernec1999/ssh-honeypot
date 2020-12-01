@@ -7,6 +7,7 @@ The point of this project is to detect bots attempting to brute force username a
 
 # Installing dependencies
 To install the Golang dependencies, you can simply run the following command.
+
 ```$ go get -d .```
 
 # Building
@@ -14,3 +15,8 @@ To install the Golang dependencies, you can simply run the following command.
 
 # Running
 ```$ go run .```
+
+# Inspiration / Credits
+* [Golang](https://golang.org/)
+* [sshproxy](https://github.com/dutchcoders/sshproxy/)
+* [sqlite3](https://github.com/mattn/go-sqlite3)
