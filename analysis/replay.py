@@ -107,4 +107,4 @@ def replay_terminal_data_from_id(file, id, speedup):
 
 
 # Replay the terminal data
-replay_terminal_data_from_id("log.sqlite", 1)
+replay_terminal_data_from_id("log.sqlite", 1, 5)
