@@ -2,23 +2,32 @@ package main
 
 import (
 	"io"
+	"time"
 )
 
 // NewSQLReadCloser creates a new SqlReadCloser struct
 func NewSQLReadCloser(r io.ReadCloser, sql SQLHoneypotDBConnection) io.ReadCloser {
-	return &SQLReadCloser{ReadCloser: r, sql: sql}
+	return &SQLReadCloser{ReadCloser: r, sql: sql, prevTime: time.Now()}
 }
 
 // SQLReadCloser type to export into a DB
 type SQLReadCloser struct {
 	io.ReadCloser
-	sql SQLHoneypotDBConnection
+	sql      SQLHoneypotDBConnection
+	prevTime time.Time
 }
 
 func (sq *SQLReadCloser) Read(p []byte) (n int, err error) {
+	// read in the bytes
 	n, err = sq.ReadCloser.Read(p)
+
+	// calculate time delay from last command
+	curTime := time.Now()
+	delay := curTime.Sub(sq.prevTime).Milliseconds()
+	sq.prevTime = curTime
+
 	// write to SQL
-	err = sq.sql.InsertMetadata(p[:n])
+	err = sq.sql.InsertMetadata(p[:n], delay)
 	return n, err
 }
 
