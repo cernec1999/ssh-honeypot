@@ -11,10 +11,10 @@ To install the Golang dependencies, you can simply run the following command.
 ```$ go get -d .```
 
 # Building
-```$ go build .```
+```$ make build```
 
 # Running
-```$ go run .```
+```$ ./sshh```
 
 # Inspiration / Credits
 * [Golang](https://golang.org/)
