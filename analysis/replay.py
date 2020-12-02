@@ -81,7 +81,7 @@ def replay_terminal_data_from_id(file, id, speedup):
         conn = _create_connection(file)
 
         # Get the resulting rows from the database with the given id
-        resulting_rows = _get_timing_data_for_id(conn, 1)
+        resulting_rows = _get_timing_data_for_id(conn, id)
 
         # Get the first timestamp
         prev_time = _convert_time_str_to_int(resulting_rows[0][0])
@@ -97,14 +97,12 @@ def replay_terminal_data_from_id(file, id, speedup):
 
             # Set the prev_time variable to the current time
             prev_time = cur_time
-    except Error as e:
+    except:
         # If we fail, restore the terminal
         _restore_terminal(init_state)
-
-        print(e)
         return
     _restore_terminal(init_state)
 
 
 # Replay the terminal data
-replay_terminal_data_from_id("log.sqlite", 1, 5)
+replay_terminal_data_from_id("log.sqlite", 1, 1)
