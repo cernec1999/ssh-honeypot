@@ -1,2 +1,4 @@
-.sqlite
-
+*.sqlite
+sshh
+__pycache__/
+*.py[cod]

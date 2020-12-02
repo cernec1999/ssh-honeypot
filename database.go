@@ -13,7 +13,7 @@ const databaseFile string = "log.sqlite"
 const createConnectionsTable string = `
 CREATE TABLE IF NOT EXISTS connections (
 	id integer PRIMARY KEY AUTOINCREMENT,
-    time DATETIME DEFAULT CURRENT_TIMESTAMP,
+    time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 	source_ip TEXT NOT NULL,
 	source_port integer NOT NULL,
 	continent TEXT NOT NULL,
@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS connections (
 const createMetadataTable string = `
 CREATE TABLE IF NOT EXISTS metadata (
 	id integer NOT NULL,
-    time DATETIME DEFAULT CURRENT_TIMESTAMP,
+    delay integer NOT NULL,
   	net_data BLOB
 );
 `
@@ -57,21 +57,22 @@ INSERT INTO attempts (
 const insertMetadata string = `
 INSERT INTO metadata (
 	id,
+	delay,
 	net_data
-) VALUES (?, ?)
+) VALUES (?, ?, ?)
 `
 
 // SQLHoneypotDBConnection defines the connection for the database
 type SQLHoneypotDBConnection struct {
 	database *sql.DB
-	connID   uint32
+	ConnID   uint32
 }
 
 // NewSQLHoneypotDBConnection creates a new DB connection for one client
 func NewSQLHoneypotDBConnection(sourceIP string, sourcePort uint16, geoData GeoData, pwdData PasswordAttemptData) SQLHoneypotDBConnection {
 	connection := SQLHoneypotDBConnection{
 		database: nil,
-		connID:   0,
+		ConnID:   0,
 	}
 
 	err := connection.initDatabaseConnection()
@@ -174,13 +175,13 @@ func (sq *SQLHoneypotDBConnection) Close() error {
 }
 
 // InsertMetadata inserts metadata to the respective connection
-func (sq *SQLHoneypotDBConnection) InsertMetadata(bytes []byte) error {
+func (sq *SQLHoneypotDBConnection) InsertMetadata(bytes []byte, delay int64) error {
 	// Check for failures
 	if sq.database == nil {
 		return errors.New("database does not exist")
 	}
 
-	if sq.connID == 0 {
+	if sq.ConnID == 0 {
 		return errors.New("connection id does not exist")
 	}
 
@@ -190,7 +191,7 @@ func (sq *SQLHoneypotDBConnection) InsertMetadata(bytes []byte) error {
 		return err
 	}
 
-	_, err = statement.Exec(sq.connID, bytes)
+	_, err = statement.Exec(sq.ConnID, delay, bytes)
 
 	if err != nil {
 		return err
@@ -224,7 +225,7 @@ func (sq *SQLHoneypotDBConnection) insertInitialConnection(sourceIP string, sour
 	}
 
 	rows.Next()
-	err = rows.Scan(&sq.connID)
+	err = rows.Scan(&sq.ConnID)
 
 	if err != nil {
 		return err
@@ -238,7 +239,7 @@ func (sq *SQLHoneypotDBConnection) insertInitialConnection(sourceIP string, sour
 			return err
 		}
 
-		_, err = statement.Exec(sq.connID, elem.username, elem.password)
+		_, err = statement.Exec(sq.ConnID, elem.username, elem.password)
 
 		if err != nil {
 			return err

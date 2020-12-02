@@ -104,6 +104,9 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 	// Create SQL connection
 	sqlConn := NewSQLHoneypotDBConnection(host, uint16(port), geoData, pwdData)
 
+	// Write debug
+	debugPrint(fmt.Sprintf("SSH connection authenticated for %s. Writing to database with ID %d.", host, sqlConn.ConnID))
+
 	// Remove old password data
 	delete(passwords, serverConnection.Conn.RemoteAddr())
 

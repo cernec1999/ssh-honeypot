@@ -23,7 +23,7 @@ def _create_connection(db_file):
 def _get_timing_data_for_id(conn, id):
     cur = conn.cursor()
     cur.execute(
-        f"SELECT time, net_data FROM metadata WHERE id={id} ORDER BY time;"
+        f"SELECT delay, net_data FROM metadata WHERE id={id}"
     )
 
     rows = cur.fetchall()
@@ -52,13 +52,6 @@ def _write_to_terminal_raw(net_data):
     os.write(sys.stdin.fileno(), net_data)
 
 
-# Convert the specified time from a string to an int
-def _convert_time_str_to_int(date_time_str):
-    return int(
-        datetime.strptime(date_time_str, "%Y-%m-%d %H:%M:%S").timestamp()
-    )
-
-
 def replay_terminal_data_from_id(file, id, speedup):
     """
     Replay the terminal data from a specific connection id.
@@ -83,26 +76,35 @@ def replay_terminal_data_from_id(file, id, speedup):
         # Get the resulting rows from the database with the given id
         resulting_rows = _get_timing_data_for_id(conn, id)
 
-        # Get the first timestamp
-        prev_time = _convert_time_str_to_int(resulting_rows[0][0])
-
         # Iterate through the remaining timestamps
         for row in resulting_rows:
+            # Sleep for n seconds, and accelerate by speedup
+            time.sleep((row[0] / 1000) * (1 / speedup))
+
             # Write raw terminal state
             _write_to_terminal_raw(row[1])
-
-            # Sleep for n seconds
-            cur_time = _convert_time_str_to_int(row[0])
-            time.sleep((cur_time - prev_time) * (1 / speedup))
-
-            # Set the prev_time variable to the current time
-            prev_time = cur_time
-    except:
+    except Exception as e:
+        print(e)
         # If we fail, restore the terminal
         _restore_terminal(init_state)
         return
     _restore_terminal(init_state)
 
 
-# Replay the terminal data
-replay_terminal_data_from_id("log.sqlite", 1, 1)
+if __name__ == "__main__":
+    # Check the correct length of system arguments
+    if (len(sys.argv) != 4):
+        raise Error("Incorrect number of arguments!")
+        exit()
+
+    # First argument: the sqlite file
+    sqlite = sys.argv[1]
+
+    # Second argument: The connection id
+    conn_id = int(sys.argv[2])
+
+    # Third argument: The speedup time
+    speedup = int(sys.argv[3])
+
+    # Replay the terminal data
+    replay_terminal_data_from_id(sqlite, conn_id, speedup)
