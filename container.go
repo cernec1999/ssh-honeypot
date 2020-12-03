@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"time"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
@@ -18,6 +20,53 @@ func IsSSHRunning(ctx context.Context, cli *client.Client, container string) (bo
 	return res.State.Health.Status == "healthy", nil
 }
 
+func GetHostPort(ctx context.Context, cli *client.Client, container string) (string, error) {
+	res, err := cli.ContainerInspect(ctx, container)
+	if err != nil {
+		return "", err
+	}
+
+	for insidePort, hostPort := range res.NetworkSettings.Ports {
+		if insidePort.Int() == 22 {
+			return hostPort[0].HostPort, nil
+		}
+	}
+
+	return "", errors.New("Unable to find host port")
+}
+
+func StopContainer(cli *client.Client, containerName string) error {
+	timeDuration, err := time.ParseDuration("5s")
+
+	if err != nil {
+		return err
+	}
+
+	cli.ContainerStop(context.Background(), containerName, &timeDuration)
+
+	return nil
+}
+
+func StartExistingContainer(cli *client.Client, containerName string) error {
+	ctx := context.Background()
+
+	// See if the container is already running
+	res, err := cli.ContainerInspect(ctx, containerName)
+	if res.State.Running {
+		return nil
+	}
+
+	// Start the container with a specific ID
+	err = cli.ContainerStart(ctx, containerName, types.ContainerStartOptions{})
+
+	// Check for errors
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func CreateAndStartNewContainer(cli *client.Client) (string, error) {
 	ctx := context.Background()
 
@@ -32,15 +81,17 @@ func CreateAndStartNewContainer(cli *client.Client) (string, error) {
 			"22/tcp": []nat.PortBinding{
 				{
 					HostIP:   "127.0.0.1",
-					HostPort: "1337",
+					HostPort: "",
 				},
 			},
 		},
+		// NetworkMode: "no-internet",
+		// TODO: create custom docker network?
 	}, nil, "")
 
 	// Return an error, if any
 	if err != nil {
-		return "", err
+		return resp.ID, err
 	}
 
 	// Start the container with the specific ID
@@ -61,7 +112,7 @@ func CreateAndStartNewContainer(cli *client.Client) (string, error) {
 	// a container to connect to. The issue then becomes for known connections,
 	// but I suppose we can simply use busy waiting since it's a less common
 	// case
-	for {
+	/*for {
 		isRunning, err := IsSSHRunning(ctx, cli, resp.ID)
 
 		// Check for errors
@@ -73,10 +124,10 @@ func CreateAndStartNewContainer(cli *client.Client) (string, error) {
 		if isRunning {
 			break
 		}
-	}
+	}*/
 
 	if err != nil {
-		return resp.ID, err
+		return "", err
 	}
 
 	return resp.ID, nil

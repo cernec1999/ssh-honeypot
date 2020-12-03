@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -24,13 +25,20 @@ const RemoteUsername string = "root"
 const RemotePassword string = "root"
 
 // RemoteAddr describes the remote server to connect to
-const RemoteAddr string = "127.0.0.1:1337"
+const RemoteAddr string = "127.0.0.1"
 
 // ServerAddr is the address and port to bind to
 const ServerAddr string = "0.0.0.0:22"
 
 // Dbg is if we are in debug mode
 const Dbg bool = true
+
+// NumContainers to have available
+// We don't ever need to spawn more than 255. That's crazy talk.
+const NumContainers uint8 = 1
+
+// channel of available containers
+var availableContainers chan string
 
 // PasswordAttemptData represents metadata about password attempts
 type PasswordAttemptData struct {
@@ -44,13 +52,33 @@ type UsernamePassword struct {
 	password string
 }
 
+// Function to ensure that there will always be at least NumContainers
+func spawnContainers() {
+	dockerClient := CreateConnection()
+
+	for {
+		str, err := CreateAndStartNewContainer(dockerClient)
+
+		if err != nil {
+			debugPrint(fmt.Sprintf("Error starting container: %v", err))
+			continue
+		}
+
+		availableContainers <- str
+	}
+
+}
+
 // Creates a connection to the remote SSH server
-func dialSSHClient(dockerConnection *client.Client) (*ssh.Client, error) {
-	// Open new container
-	_, err := CreateAndStartNewContainer(dockerConnection)
+func dialSSHClient(dockerConnection *client.Client) (*ssh.Client, string, error) {
+	// Pop new connection
+	conn := <-availableContainers
+
+	// Get NAT'd port number
+	port, err := GetHostPort(context.Background(), dockerConnection, conn)
 
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	// Configure an ssh client
@@ -64,9 +92,10 @@ func dialSSHClient(dockerConnection *client.Client) (*ssh.Client, error) {
 	// Ignore host key verification
 	clientConfig.HostKeyCallback = ssh.InsecureIgnoreHostKey()
 
-	client, err := ssh.Dial("tcp", RemoteAddr, clientConfig)
+	// Finally, redirect to docker container
+	client, err := ssh.Dial("tcp", fmt.Sprintf("%s:%s", RemoteAddr, port), clientConfig)
 
-	return client, err
+	return client, conn, err
 }
 
 // Serve a single SSH connection
@@ -85,9 +114,9 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 	dockerClient := CreateConnection()
 
 	// Proxy the SSH request by dialing a new ssh client
-	clientConnection, err := dialSSHClient(dockerClient)
+	clientConnection, containerID, err := dialSSHClient(dockerClient)
 	if err != nil {
-		debugPrint(fmt.Sprintf("Could not dial SSH client: %v", err))
+		debugPrint(fmt.Sprintf("Could not dial SSH client to %s: %v", containerID, err))
 		return err
 	}
 
@@ -123,6 +152,13 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 	// Close client connection on exit
 	defer clientConnection.Close()
 	defer sqlConn.Close()
+	defer func() {
+		debugPrint("Closing connection and stopping containers.")
+		err = StopContainer(dockerClient, containerID)
+		if err != nil {
+			debugPrint(fmt.Sprintf("Error closing container: %v", err))
+		}
+	}()
 
 	go ssh.DiscardRequests(serverRequests)
 
@@ -213,6 +249,12 @@ func main() {
 
 	// Create a map for all the clients
 	passwords := make(map[net.Addr]PasswordAttemptData)
+
+	// Create a channel list for the new containers
+	availableContainers = make(chan string, NumContainers)
+
+	// Create the initial containers
+	go spawnContainers()
 
 	// Configure ssh server
 	config := &ssh.ServerConfig{
