@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"math/rand"
 	"net"
 	"strconv"
 
+	"github.com/docker/docker/client"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -18,13 +18,13 @@ import (
 const PrivKeyLocation string = "/Users/cernec1999/.ssh/id_rsa"
 
 // RemoteUsername is the username of the remote server
-const RemoteUsername string = "dev"
+const RemoteUsername string = "root"
 
 // RemotePassword is the remote's password
-const RemotePassword string = "j.#dM#N<`w>Ehv8:7\"4X8cpy\"f)2X5"
+const RemotePassword string = "root"
 
 // RemoteAddr describes the remote server to connect to
-const RemoteAddr string = "127.0.0.1:1234"
+const RemoteAddr string = "127.0.0.1:1337"
 
 // ServerAddr is the address and port to bind to
 const ServerAddr string = "0.0.0.0:22"
@@ -45,7 +45,14 @@ type UsernamePassword struct {
 }
 
 // Creates a connection to the remote SSH server
-func dialSSHClient() (*ssh.Client, error) {
+func dialSSHClient(dockerConnection *client.Client) (*ssh.Client, error) {
+	// Open new container
+	_, err := CreateAndStartNewContainer(dockerConnection)
+
+	if err != nil {
+		return nil, err
+	}
+
 	// Configure an ssh client
 	clientConfig := &ssh.ClientConfig{}
 
@@ -74,8 +81,11 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 	// Close connection when function returns
 	defer serverConnection.Close()
 
+	// Create docker connection
+	dockerClient := CreateConnection()
+
 	// Proxy the SSH request by dialing a new ssh client
-	clientConnection, err := dialSSHClient()
+	clientConnection, err := dialSSHClient(dockerClient)
 	if err != nil {
 		debugPrint(fmt.Sprintf("Could not dial SSH client: %v", err))
 		return err
@@ -121,7 +131,7 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 		// Create client connection
 		clientChannel, clientRequests, err := clientConnection.OpenChannel(newChannel.ChannelType(), newChannel.ExtraData())
 		if err != nil {
-			log.Fatalf("Could not accept client channel: %s", err.Error())
+			debugPrint(fmt.Sprintf("Could not accept client channel: %s", err.Error()))
 			return err
 		}
 
