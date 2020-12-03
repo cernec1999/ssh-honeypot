@@ -17,6 +17,7 @@ type SQLReadCloser struct {
 	prevTime time.Time
 }
 
+// Read reads in some bytes and puts it in the database
 func (sq *SQLReadCloser) Read(p []byte) (n int, err error) {
 	// read in the bytes
 	n, err = sq.ReadCloser.Read(p)

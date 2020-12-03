@@ -11,8 +11,18 @@ import (
 	"github.com/docker/go-connections/nat"
 )
 
-func IsSSHRunning(ctx context.Context, cli *client.Client, container string) (bool, error) {
-	res, err := cli.ContainerInspect(ctx, container)
+// IsSSHRunning returns true if the container is running.
+func IsSSHRunning(container string) (bool, error) {
+	cli, err := CreateConnection()
+
+	// Error handling
+	if err != nil {
+		return false, err
+	}
+
+	defer cli.Close()
+
+	res, err := cli.ContainerInspect(context.Background(), container)
 	if err != nil {
 		return false, err
 	}
@@ -20,8 +30,18 @@ func IsSSHRunning(ctx context.Context, cli *client.Client, container string) (bo
 	return res.State.Health.Status == "healthy", nil
 }
 
-func GetHostPort(ctx context.Context, cli *client.Client, container string) (string, error) {
-	res, err := cli.ContainerInspect(ctx, container)
+// GetHostPort returns the port of a container.
+func GetHostPort(container string) (string, error) {
+	cli, err := CreateConnection()
+
+	// Error handling
+	if err != nil {
+		return "", err
+	}
+
+	defer cli.Close()
+
+	res, err := cli.ContainerInspect(context.Background(), container)
 	if err != nil {
 		return "", err
 	}
@@ -35,7 +55,17 @@ func GetHostPort(ctx context.Context, cli *client.Client, container string) (str
 	return "", errors.New("Unable to find host port")
 }
 
-func StopContainer(cli *client.Client, containerName string) error {
+// StopContainer stops the container
+func StopContainer(containerName string) error {
+	cli, err := CreateConnection()
+
+	// Error handling
+	if err != nil {
+		return err
+	}
+
+	defer cli.Close()
+
 	timeDuration, err := time.ParseDuration("5s")
 
 	if err != nil {
@@ -47,30 +77,48 @@ func StopContainer(cli *client.Client, containerName string) error {
 	return nil
 }
 
-func StartExistingContainer(cli *client.Client, containerName string) error {
-	ctx := context.Background()
+// StartExistingContainer starts the container
+func StartExistingContainer(containerName string) error {
+	cli, err := CreateConnection()
+
+	// Error handling
+	if err != nil {
+		return err
+	}
+
+	defer cli.Close()
 
 	// See if the container is already running
-	res, err := cli.ContainerInspect(ctx, containerName)
+	res, err := cli.ContainerInspect(context.Background(), containerName)
 	if res.State.Running {
 		return nil
 	}
 
 	// Start the container with a specific ID
-	err = cli.ContainerStart(ctx, containerName, types.ContainerStartOptions{})
+	err = cli.ContainerStart(context.Background(), containerName, types.ContainerStartOptions{})
 
 	// Check for errors
 	if err != nil {
 		return err
 	}
 
+	cli.Close()
+
 	return nil
 }
 
-func CreateAndStartNewContainer(cli *client.Client) (string, error) {
-	ctx := context.Background()
+// CreateAndStartNewContainer creates a new container
+func CreateAndStartNewContainer() (string, error) {
+	cli, err := CreateConnection()
 
-	resp, err := cli.ContainerCreate(ctx, &container.Config{
+	// Error handling
+	if err != nil {
+		return "", err
+	}
+
+	defer cli.Close()
+
+	resp, err := cli.ContainerCreate(context.Background(), &container.Config{
 		Image:    "sshh",
 		Hostname: "ecorp-finances",
 		ExposedPorts: nat.PortSet{
@@ -95,45 +143,18 @@ func CreateAndStartNewContainer(cli *client.Client) (string, error) {
 	}
 
 	// Start the container with the specific ID
-	err = cli.ContainerStart(ctx, resp.ID, types.ContainerStartOptions{})
+	err = cli.ContainerStart(context.Background(), resp.ID, types.ContainerStartOptions{})
 
 	// Check for errors
 	if err != nil {
 		return resp.ID, err
 	}
 
-	// Unfortunately, we're in a bit of a tizzy here. We currently have no
-	// reliable way to detect when the container is open. On Linux, we can
-	// get around this by simply connecting to port 22 and waiting, but on
-	// macOS, we probably have to rely on HEALTHCHECK and busy-waiting
-
-	// Maybe get around this by making a pool of docker containers, and just
-	// pick one per connection? Then, every new connection will always have
-	// a container to connect to. The issue then becomes for known connections,
-	// but I suppose we can simply use busy waiting since it's a less common
-	// case
-	/*for {
-		isRunning, err := IsSSHRunning(ctx, cli, resp.ID)
-
-		// Check for errors
-		if err != nil {
-			return resp.ID, err
-		}
-
-		// Break if running
-		if isRunning {
-			break
-		}
-	}*/
-
-	if err != nil {
-		return "", err
-	}
-
 	return resp.ID, nil
 }
 
-func CreateConnection() *client.Client {
+// CreateConnection creates a new docker connection
+func CreateConnection() (*client.Client, error) {
 	// A good place to get up and running: https://docs.docker.com/engine/api/sdk/
 	// Create new docker client
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
@@ -141,8 +162,8 @@ func CreateConnection() *client.Client {
 	// If error, we do nothing
 	if err != nil {
 		debugPrint("Unable to create the docker connection")
-		return nil
+		return nil, err
 	}
 
-	return cli
+	return cli, nil
 }

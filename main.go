@@ -1,16 +1,17 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"math/rand"
 	"net"
+	"os"
+	"os/signal"
 	"strconv"
+	"time"
 
-	"github.com/docker/docker/client"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -35,10 +36,10 @@ const Dbg bool = true
 
 // NumContainers to have available
 // We don't ever need to spawn more than 255. That's crazy talk.
-const NumContainers uint8 = 1
+const NumContainers uint8 = 5
 
-// channel of available containers
-var availableContainers chan string
+// KeepAliveTime specifies how long to keep the container alive
+const KeepAliveTime string = "5m"
 
 // PasswordAttemptData represents metadata about password attempts
 type PasswordAttemptData struct {
@@ -52,30 +53,45 @@ type UsernamePassword struct {
 	password string
 }
 
-// Function to ensure that there will always be at least NumContainers
-func spawnContainers() {
-	dockerClient := CreateConnection()
+// global channel of available containers
+// Methinks we should make a struct and put a semaphore inside of it
+var availableContainers chan string
 
-	for {
-		str, err := CreateAndStartNewContainer(dockerClient)
+// Is the program still running?
+var programIsRunning bool = true
+
+// Function to ensure that there will always be at least NumContainers
+// Note: This will spawn one more container that doesn't get added into
+// the channel list. Not sure if there is Golang syntax to fix this, but
+// we'll call it a feature, not a bug. I know we can get around this using
+// other synchronization constructs like Semaphores, but I like the syntax
+// of channels.
+func spawnContainers() {
+	for programIsRunning {
+		str, err := CreateAndStartNewContainer()
 
 		if err != nil {
 			debugPrint(fmt.Sprintf("Error starting container: %v", err))
 			continue
 		}
 
+		// This blocks if n containers are already in the list
 		availableContainers <- str
 	}
 
 }
 
 // Creates a connection to the remote SSH server
-func dialSSHClient(dockerConnection *client.Client) (*ssh.Client, string, error) {
+func dialSSHClient() (*ssh.Client, string, error) {
 	// Pop new connection
 	conn := <-availableContainers
 
+	// Do we have a race condition here where
+	// the container could still be running with
+	// SIGINT at this point?
+
 	// Get NAT'd port number
-	port, err := GetHostPort(context.Background(), dockerConnection, conn)
+	port, err := GetHostPort(conn)
 
 	if err != nil {
 		return nil, "", err
@@ -110,15 +126,20 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 	// Close connection when function returns
 	defer serverConnection.Close()
 
-	// Create docker connection
-	dockerClient := CreateConnection()
-
 	// Proxy the SSH request by dialing a new ssh client
-	clientConnection, containerID, err := dialSSHClient(dockerClient)
+	clientConnection, containerID, err := dialSSHClient()
 	if err != nil {
 		debugPrint(fmt.Sprintf("Could not dial SSH client to %s: %v", containerID, err))
 		return err
 	}
+
+	// Stop the container after n seconds
+	dur, _ := time.ParseDuration(KeepAliveTime)
+
+	timer := time.AfterFunc(dur, func() {
+		StopContainer(containerID)
+	})
+	defer timer.Stop()
 
 	// Get the password data for that connection
 	pwdData := passwords[serverConnection.Conn.RemoteAddr()]
@@ -154,7 +175,7 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 	defer sqlConn.Close()
 	defer func() {
 		debugPrint("Closing connection and stopping containers.")
-		err = StopContainer(dockerClient, containerID)
+		err = StopContainer(containerID)
 		if err != nil {
 			debugPrint(fmt.Sprintf("Error closing container: %v", err))
 		}
@@ -215,6 +236,9 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 			// Finally, close the connections
 			serverChannel.Close()
 			clientChannel.Close()
+
+			// We should kill the docker container after x seconds?
+
 		}()
 
 		var wrappedServerChannel io.ReadCloser = serverChannel
@@ -248,6 +272,7 @@ func main() {
 	}
 
 	// Create a map for all the clients
+	// TODO: is there a data race here? need to check if passwords is thread safe.
 	passwords := make(map[net.Addr]PasswordAttemptData)
 
 	// Create a channel list for the new containers
@@ -255,6 +280,36 @@ func main() {
 
 	// Create the initial containers
 	go spawnContainers()
+
+	// SigINT handling
+	// This cleanly stops the docker containers
+	c := make(chan os.Signal)
+	signal.Notify(c, os.Interrupt)
+	go func() {
+		for range c {
+			programIsRunning = false
+
+			// Pull connections from the channel and kill them. At
+			// this point, we shouldn't have any more additions, only
+			// removals.
+		innerLoop:
+			for {
+				select {
+				case cont := <-availableContainers:
+					StopContainer(cont)
+				default:
+					break innerLoop
+				}
+			}
+
+			// TODO: Clean up actively running connections.
+
+			debugPrint("Exiting honeypot")
+
+			// Exit
+			os.Exit(0)
+		}
+	}()
 
 	// Configure ssh server
 	config := &ssh.ServerConfig{
