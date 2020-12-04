@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -10,9 +11,11 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/sync/semaphore"
 )
 
 // PrivKeyLocation is the location of the private key to be used
@@ -36,7 +39,7 @@ const Dbg bool = true
 
 // NumContainers to have available
 // We don't ever need to spawn more than 255. That's crazy talk.
-const NumContainers uint8 = 5
+const NumContainers uint8 = 1
 
 // KeepAliveTime specifies how long to keep the container alive
 const KeepAliveTime string = "5m"
@@ -54,8 +57,15 @@ type UsernamePassword struct {
 }
 
 // global channel of available containers
-// Methinks we should make a struct and put a semaphore inside of it
-var availableContainers chan string
+var availableContainers AvailableContainers
+
+// AvailableContainers describes a list of the container names to be
+// popped from.
+type AvailableContainers struct {
+	containerEvent     *semaphore.Weighted
+	containerNames     []string
+	containerNamesLock sync.Mutex
+}
 
 // Is the program still running?
 var programIsRunning bool = true
@@ -68,6 +78,11 @@ var programIsRunning bool = true
 // of channels.
 func spawnContainers() {
 	for programIsRunning {
+		// Acquire a semaphore so that only the max number of containers at
+		// any given time is only AvailableContainers
+		availableContainers.containerEvent.Acquire(context.Background(), 1)
+
+		// Spawn container
 		str, err := CreateAndStartNewContainer()
 
 		if err != nil {
@@ -75,8 +90,10 @@ func spawnContainers() {
 			continue
 		}
 
-		// This blocks if n containers are already in the list
-		availableContainers <- str
+		// Lock the list and append the container name
+		availableContainers.containerNamesLock.Lock()
+		availableContainers.containerNames = append(availableContainers.containerNames, str)
+		availableContainers.containerNamesLock.Unlock()
 	}
 
 }
@@ -84,7 +101,11 @@ func spawnContainers() {
 // Creates a connection to the remote SSH server
 func dialSSHClient() (*ssh.Client, string, error) {
 	// Pop new connection
-	conn := <-availableContainers
+	availableContainers.containerNamesLock.Lock()
+	conn := availableContainers.containerNames[0]
+	availableContainers.containerNames = availableContainers.containerNames[1:]
+	availableContainers.containerEvent.Release(1)
+	availableContainers.containerNamesLock.Unlock()
 
 	// Do we have a race condition here where
 	// the container could still be running with
@@ -276,7 +297,11 @@ func main() {
 	passwords := make(map[net.Addr]PasswordAttemptData)
 
 	// Create a channel list for the new containers
-	availableContainers = make(chan string, NumContainers)
+	// availableContainers = make(chan string, NumContainers)
+	availableContainers = AvailableContainers{
+		containerEvent: semaphore.NewWeighted(int64(NumContainers)),
+		containerNames: []string{},
+	}
 
 	// Create the initial containers
 	go spawnContainers()
@@ -294,12 +319,22 @@ func main() {
 			// removals.
 		innerLoop:
 			for {
-				select {
-				case cont := <-availableContainers:
-					StopContainer(cont)
-				default:
+				availableContainers.containerNamesLock.Lock()
+
+				// Get container to remove and stop it
+				conn := availableContainers.containerNames[0]
+				availableContainers.containerNames = availableContainers.containerNames[1:]
+				StopContainer(conn)
+
+				// If we popped the last one off, break
+				if len(availableContainers.containerNames) == 0 {
+					availableContainers.containerNamesLock.Unlock()
 					break innerLoop
 				}
+
+				// Unlock the mutex
+				availableContainers.containerNamesLock.Unlock()
+
 			}
 
 			// TODO: Clean up actively running connections.
