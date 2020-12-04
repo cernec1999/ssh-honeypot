@@ -88,8 +88,14 @@ func StartExistingContainer(containerName string) error {
 
 	defer cli.Close()
 
-	// See if the container is already running
+	// Inspect container attributes
 	res, err := cli.ContainerInspect(context.Background(), containerName)
+
+	if err != nil {
+		return err
+	}
+
+	// If the container is running, do nothing
 	if res.State.Running {
 		return nil
 	}

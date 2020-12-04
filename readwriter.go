@@ -22,6 +22,11 @@ func (sq *SQLReadCloser) Read(p []byte) (n int, err error) {
 	// read in the bytes
 	n, err = sq.ReadCloser.Read(p)
 
+	// We may have a closed connection here
+	if err != nil {
+		return 0, err
+	}
+
 	// calculate time delay from last command
 	curTime := time.Now()
 	delay := curTime.Sub(sq.prevTime).Milliseconds()

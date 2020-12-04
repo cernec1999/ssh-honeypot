@@ -71,11 +71,6 @@ type AvailableContainers struct {
 var programIsRunning bool = true
 
 // Function to ensure that there will always be at least NumContainers
-// Note: This will spawn one more container that doesn't get added into
-// the channel list. Not sure if there is Golang syntax to fix this, but
-// we'll call it a feature, not a bug. I know we can get around this using
-// other synchronization constructs like Semaphores, but I like the syntax
-// of channels.
 func spawnContainers() {
 	for programIsRunning {
 		// Acquire a semaphore so that only the max number of containers at
@@ -99,17 +94,46 @@ func spawnContainers() {
 }
 
 // Creates a connection to the remote SSH server
-func dialSSHClient() (*ssh.Client, string, error) {
-	// Pop new connection
-	availableContainers.containerNamesLock.Lock()
-	conn := availableContainers.containerNames[0]
-	availableContainers.containerNames = availableContainers.containerNames[1:]
-	availableContainers.containerEvent.Release(1)
-	availableContainers.containerNamesLock.Unlock()
+func dialSSHClient(containerID string) (*ssh.Client, string, error) {
+	startExistingContainer := false
 
-	// Do we have a race condition here where
-	// the container could still be running with
-	// SIGINT at this point?
+	if containerID != "" {
+		err := StartExistingContainer(containerID)
+
+		if err != nil {
+			debugPrint(fmt.Sprintf("Could not start existing container. Will start new: %v", err))
+			startExistingContainer = false
+		} else {
+			startExistingContainer = true
+		}
+	}
+
+	conn := ""
+
+	if startExistingContainer {
+		// Busy wait til the server is up
+		for {
+			// Busy wait til we're back in business
+			bool, err := IsSSHRunning(containerID)
+
+			if err != nil {
+				return nil, "", err
+			}
+
+			if bool {
+				break
+			}
+		}
+
+		conn = containerID
+	} else {
+		// Pop new connection, we know these are running
+		availableContainers.containerNamesLock.Lock()
+		conn = availableContainers.containerNames[0]
+		availableContainers.containerNames = availableContainers.containerNames[1:]
+		availableContainers.containerEvent.Release(1)
+		availableContainers.containerNamesLock.Unlock()
+	}
 
 	// Get NAT'd port number
 	port, err := GetHostPort(conn)
@@ -147,8 +171,24 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 	// Close connection when function returns
 	defer serverConnection.Close()
 
+	// Split address
+	host, strPort, err := net.SplitHostPort(serverConnection.Conn.RemoteAddr().String())
+
+	if err != nil {
+		debugPrint(fmt.Sprintf("Could not split host and port: %v", err))
+		return err
+	}
+
+	// See if connection already exists
+	existsContID, err := GetContainerIDFromConnection(host)
+
+	if err != nil {
+		debugPrint(fmt.Sprintf("Could not get container ID: %v", err))
+		return err
+	}
+
 	// Proxy the SSH request by dialing a new ssh client
-	clientConnection, containerID, err := dialSSHClient()
+	clientConnection, containerID, err := dialSSHClient(existsContID)
 	if err != nil {
 		debugPrint(fmt.Sprintf("Could not dial SSH client to %s: %v", containerID, err))
 		return err
@@ -165,14 +205,6 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 	// Get the password data for that connection
 	pwdData := passwords[serverConnection.Conn.RemoteAddr()]
 
-	// Split address
-	host, strPort, err := net.SplitHostPort(serverConnection.Conn.RemoteAddr().String())
-
-	if err != nil {
-		debugPrint(fmt.Sprintf("Could not split host and port: %v", err))
-		return err
-	}
-
 	port, err := strconv.ParseUint(strPort, 10, 16)
 
 	if err != nil {
@@ -183,7 +215,7 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 	geoData := GetGeoData(host)
 
 	// Create SQL connection
-	sqlConn := NewSQLHoneypotDBConnection(host, uint16(port), geoData, pwdData)
+	sqlConn := NewSQLHoneypotDBConnection(host, uint16(port), geoData, pwdData, containerID)
 
 	// Write debug
 	debugPrint(fmt.Sprintf("SSH connection authenticated for %s. Writing to database with ID %d.", host, sqlConn.ConnID))
@@ -195,7 +227,10 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 	defer clientConnection.Close()
 	defer sqlConn.Close()
 	defer func() {
-		debugPrint("Closing connection and stopping containers.")
+		debugPrint("Closing connection and stopping container.")
+		// TODO: One IP address can be connected in multiple SSH clients
+		// We should only stop the container if all of them disconnect.
+		// Dunno how to check this now, we need to maintain state better
 		err = StopContainer(containerID)
 		if err != nil {
 			debugPrint(fmt.Sprintf("Error closing container: %v", err))
@@ -294,6 +329,8 @@ func main() {
 
 	// Create a map for all the clients
 	// TODO: is there a data race here? need to check if passwords is thread safe.
+	// Also probably want to find a better way to do this. Maybe create a list of
+	// activate connections here.
 	passwords := make(map[net.Addr]PasswordAttemptData)
 
 	// Create a channel list for the new containers
