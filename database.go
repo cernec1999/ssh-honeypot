@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS connections (
 	continent TEXT NOT NULL,
 	country TEXT NOT NULL,
 	city TEXT NOT NULL,
-	attempts integer
+	attempts integer,
+	container TEXT NOT NULL
 );`
 
 const createMetadataTable string = `
@@ -44,8 +45,9 @@ INSERT INTO connections (
 	continent,
 	country,
 	city,
-	attempts
-) VALUES (?, ?, ?, ?, ?, ?)`
+	attempts,
+	container
+) VALUES (?, ?, ?, ?, ?, ?, ?)`
 
 const insertAttempt string = `
 INSERT INTO attempts (
@@ -69,7 +71,7 @@ type SQLHoneypotDBConnection struct {
 }
 
 // NewSQLHoneypotDBConnection creates a new DB connection for one client
-func NewSQLHoneypotDBConnection(sourceIP string, sourcePort uint16, geoData GeoData, pwdData PasswordAttemptData) SQLHoneypotDBConnection {
+func NewSQLHoneypotDBConnection(sourceIP string, sourcePort uint16, geoData GeoData, pwdData PasswordAttemptData, container string) SQLHoneypotDBConnection {
 	connection := SQLHoneypotDBConnection{
 		database: nil,
 		ConnID:   0,
@@ -83,7 +85,7 @@ func NewSQLHoneypotDBConnection(sourceIP string, sourcePort uint16, geoData GeoD
 	}
 
 	// Add to the connections table
-	err = connection.insertInitialConnection(sourceIP, sourcePort, geoData, pwdData)
+	err = connection.insertInitialConnection(sourceIP, sourcePort, geoData, pwdData, container)
 
 	if err != nil {
 		debugPrint(fmt.Sprintf("Unable to insert initial connection: %s", err))
@@ -200,7 +202,7 @@ func (sq *SQLHoneypotDBConnection) InsertMetadata(bytes []byte, delay int64) err
 	return nil
 }
 
-func (sq *SQLHoneypotDBConnection) insertInitialConnection(sourceIP string, sourcePort uint16, geoData GeoData, pwdData PasswordAttemptData) error {
+func (sq *SQLHoneypotDBConnection) insertInitialConnection(sourceIP string, sourcePort uint16, geoData GeoData, pwdData PasswordAttemptData, container string) error {
 	if sq.database == nil {
 		return errors.New("database does not exist")
 	}
@@ -211,7 +213,7 @@ func (sq *SQLHoneypotDBConnection) insertInitialConnection(sourceIP string, sour
 		return err
 	}
 
-	_, err = statement.Exec(sourceIP, sourcePort, geoData.ContinentCode, geoData.CountryCode, geoData.City, pwdData.numAttempts)
+	_, err = statement.Exec(sourceIP, sourcePort, geoData.ContinentCode, geoData.CountryCode, geoData.City, pwdData.numAttempts, container)
 
 	if err != nil {
 		return err
@@ -223,6 +225,8 @@ func (sq *SQLHoneypotDBConnection) insertInitialConnection(sourceIP string, sour
 	if err != nil {
 		return err
 	}
+
+	defer rows.Close()
 
 	rows.Next()
 	err = rows.Scan(&sq.ConnID)
@@ -247,4 +251,49 @@ func (sq *SQLHoneypotDBConnection) insertInitialConnection(sourceIP string, sour
 	}
 
 	return nil
+}
+
+// GetContainerIDFromConnection gets the container ID from a specific IP
+func GetContainerIDFromConnection(ip string) (string, error) {
+	// Create new connection, just for this transaction
+	connection := SQLHoneypotDBConnection{
+		database: nil,
+		ConnID:   0,
+	}
+
+	err := connection.initDatabaseConnection()
+
+	if err != nil {
+		debugPrint(fmt.Sprintf("The database handler has encountered an unrecoverable error: %s", err))
+		return "", err
+	}
+
+	// Close connection when done
+	defer connection.Close()
+
+	rows, err := connection.database.Query("SELECT container FROM connections WHERE source_ip == ? ORDER BY id DESC", ip)
+
+	defer rows.Close()
+
+	if err != nil {
+		return "", err
+	}
+
+	containerID := ""
+
+	nextRowExists := rows.Next()
+
+	// If we have a result, return it
+	if nextRowExists {
+		err = rows.Scan(&containerID)
+
+		if err != nil {
+			return "", err
+		}
+
+		return containerID, nil
+	}
+
+	// If no result, return empty string
+	return "", nil
 }

@@ -1,16 +1,21 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"math/rand"
 	"net"
+	"os"
+	"os/signal"
 	"strconv"
+	"sync"
+	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/sync/semaphore"
 )
 
 // PrivKeyLocation is the location of the private key to be used
@@ -18,19 +23,26 @@ import (
 const PrivKeyLocation string = "/Users/cernec1999/.ssh/id_rsa"
 
 // RemoteUsername is the username of the remote server
-const RemoteUsername string = "dev"
+const RemoteUsername string = "root"
 
 // RemotePassword is the remote's password
-const RemotePassword string = "j.#dM#N<`w>Ehv8:7\"4X8cpy\"f)2X5"
+const RemotePassword string = "root"
 
 // RemoteAddr describes the remote server to connect to
-const RemoteAddr string = "127.0.0.1:1234"
+const RemoteAddr string = "127.0.0.1"
 
 // ServerAddr is the address and port to bind to
 const ServerAddr string = "0.0.0.0:22"
 
 // Dbg is if we are in debug mode
 const Dbg bool = true
+
+// NumContainers to have available
+// We don't ever need to spawn more than 255. That's crazy talk.
+const NumContainers uint8 = 1
+
+// KeepAliveTime specifies how long to keep the container alive
+const KeepAliveTime string = "5m"
 
 // PasswordAttemptData represents metadata about password attempts
 type PasswordAttemptData struct {
@@ -44,8 +56,92 @@ type UsernamePassword struct {
 	password string
 }
 
+// global channel of available containers
+var availableContainers AvailableContainers
+
+// AvailableContainers describes a list of the container names to be
+// popped from.
+type AvailableContainers struct {
+	containerEvent     *semaphore.Weighted
+	containerNames     []string
+	containerNamesLock sync.Mutex
+}
+
+// Is the program still running?
+var programIsRunning bool = true
+
+// Function to ensure that there will always be at least NumContainers
+func spawnContainers() {
+	for programIsRunning {
+		// Acquire a semaphore so that only the max number of containers at
+		// any given time is only AvailableContainers
+		availableContainers.containerEvent.Acquire(context.Background(), 1)
+
+		// Spawn container
+		str, err := CreateAndStartNewContainer()
+
+		if err != nil {
+			debugPrint(fmt.Sprintf("Error starting container: %v", err))
+			continue
+		}
+
+		// Lock the list and append the container name
+		availableContainers.containerNamesLock.Lock()
+		availableContainers.containerNames = append(availableContainers.containerNames, str)
+		availableContainers.containerNamesLock.Unlock()
+	}
+
+}
+
 // Creates a connection to the remote SSH server
-func dialSSHClient() (*ssh.Client, error) {
+func dialSSHClient(containerID string) (*ssh.Client, string, error) {
+	startExistingContainer := false
+
+	if containerID != "" {
+		err := StartExistingContainer(containerID)
+
+		if err != nil {
+			debugPrint(fmt.Sprintf("Could not start existing container. Will start new: %v", err))
+			startExistingContainer = false
+		} else {
+			startExistingContainer = true
+		}
+	}
+
+	conn := ""
+
+	if startExistingContainer {
+		// Busy wait til the server is up
+		for {
+			// Busy wait til we're back in business
+			bool, err := IsSSHRunning(containerID)
+
+			if err != nil {
+				return nil, "", err
+			}
+
+			if bool {
+				break
+			}
+		}
+
+		conn = containerID
+	} else {
+		// Pop new connection, we know these are running
+		availableContainers.containerNamesLock.Lock()
+		conn = availableContainers.containerNames[0]
+		availableContainers.containerNames = availableContainers.containerNames[1:]
+		availableContainers.containerEvent.Release(1)
+		availableContainers.containerNamesLock.Unlock()
+	}
+
+	// Get NAT'd port number
+	port, err := GetHostPort(conn)
+
+	if err != nil {
+		return nil, "", err
+	}
+
 	// Configure an ssh client
 	clientConfig := &ssh.ClientConfig{}
 
@@ -57,9 +153,10 @@ func dialSSHClient() (*ssh.Client, error) {
 	// Ignore host key verification
 	clientConfig.HostKeyCallback = ssh.InsecureIgnoreHostKey()
 
-	client, err := ssh.Dial("tcp", RemoteAddr, clientConfig)
+	// Finally, redirect to docker container
+	client, err := ssh.Dial("tcp", fmt.Sprintf("%s:%s", RemoteAddr, port), clientConfig)
 
-	return client, err
+	return client, conn, err
 }
 
 // Serve a single SSH connection
@@ -74,16 +171,6 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 	// Close connection when function returns
 	defer serverConnection.Close()
 
-	// Proxy the SSH request by dialing a new ssh client
-	clientConnection, err := dialSSHClient()
-	if err != nil {
-		debugPrint(fmt.Sprintf("Could not dial SSH client: %v", err))
-		return err
-	}
-
-	// Get the password data for that connection
-	pwdData := passwords[serverConnection.Conn.RemoteAddr()]
-
 	// Split address
 	host, strPort, err := net.SplitHostPort(serverConnection.Conn.RemoteAddr().String())
 
@@ -91,6 +178,32 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 		debugPrint(fmt.Sprintf("Could not split host and port: %v", err))
 		return err
 	}
+
+	// See if connection already exists
+	existsContID, err := GetContainerIDFromConnection(host)
+
+	if err != nil {
+		debugPrint(fmt.Sprintf("Could not get container ID: %v", err))
+		return err
+	}
+
+	// Proxy the SSH request by dialing a new ssh client
+	clientConnection, containerID, err := dialSSHClient(existsContID)
+	if err != nil {
+		debugPrint(fmt.Sprintf("Could not dial SSH client to %s: %v", containerID, err))
+		return err
+	}
+
+	// Stop the container after n seconds
+	dur, _ := time.ParseDuration(KeepAliveTime)
+
+	timer := time.AfterFunc(dur, func() {
+		StopContainer(containerID)
+	})
+	defer timer.Stop()
+
+	// Get the password data for that connection
+	pwdData := passwords[serverConnection.Conn.RemoteAddr()]
 
 	port, err := strconv.ParseUint(strPort, 10, 16)
 
@@ -102,7 +215,7 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 	geoData := GetGeoData(host)
 
 	// Create SQL connection
-	sqlConn := NewSQLHoneypotDBConnection(host, uint16(port), geoData, pwdData)
+	sqlConn := NewSQLHoneypotDBConnection(host, uint16(port), geoData, pwdData, containerID)
 
 	// Write debug
 	debugPrint(fmt.Sprintf("SSH connection authenticated for %s. Writing to database with ID %d.", host, sqlConn.ConnID))
@@ -113,6 +226,16 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 	// Close client connection on exit
 	defer clientConnection.Close()
 	defer sqlConn.Close()
+	defer func() {
+		debugPrint("Closing connection and stopping container.")
+		// TODO: One IP address can be connected in multiple SSH clients
+		// We should only stop the container if all of them disconnect.
+		// Dunno how to check this now, we need to maintain state better
+		err = StopContainer(containerID)
+		if err != nil {
+			debugPrint(fmt.Sprintf("Error closing container: %v", err))
+		}
+	}()
 
 	go ssh.DiscardRequests(serverRequests)
 
@@ -121,7 +244,7 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 		// Create client connection
 		clientChannel, clientRequests, err := clientConnection.OpenChannel(newChannel.ChannelType(), newChannel.ExtraData())
 		if err != nil {
-			log.Fatalf("Could not accept client channel: %s", err.Error())
+			debugPrint(fmt.Sprintf("Could not accept client channel: %s", err.Error()))
 			return err
 		}
 
@@ -169,6 +292,9 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 			// Finally, close the connections
 			serverChannel.Close()
 			clientChannel.Close()
+
+			// We should kill the docker container after x seconds?
+
 		}()
 
 		var wrappedServerChannel io.ReadCloser = serverChannel
@@ -202,7 +328,60 @@ func main() {
 	}
 
 	// Create a map for all the clients
+	// TODO: is there a data race here? need to check if passwords is thread safe.
+	// Also probably want to find a better way to do this. Maybe create a list of
+	// activate connections here.
 	passwords := make(map[net.Addr]PasswordAttemptData)
+
+	// Create a channel list for the new containers
+	// availableContainers = make(chan string, NumContainers)
+	availableContainers = AvailableContainers{
+		containerEvent: semaphore.NewWeighted(int64(NumContainers)),
+		containerNames: []string{},
+	}
+
+	// Create the initial containers
+	go spawnContainers()
+
+	// SigINT handling
+	// This cleanly stops the docker containers
+	c := make(chan os.Signal)
+	signal.Notify(c, os.Interrupt)
+	go func() {
+		for range c {
+			programIsRunning = false
+
+			// Pull connections from the channel and kill them. At
+			// this point, we shouldn't have any more additions, only
+			// removals.
+		innerLoop:
+			for {
+				availableContainers.containerNamesLock.Lock()
+
+				// Get container to remove and stop it
+				conn := availableContainers.containerNames[0]
+				availableContainers.containerNames = availableContainers.containerNames[1:]
+				StopContainer(conn)
+
+				// If we popped the last one off, break
+				if len(availableContainers.containerNames) == 0 {
+					availableContainers.containerNamesLock.Unlock()
+					break innerLoop
+				}
+
+				// Unlock the mutex
+				availableContainers.containerNamesLock.Unlock()
+
+			}
+
+			// TODO: Clean up actively running connections.
+
+			debugPrint("Exiting honeypot")
+
+			// Exit
+			os.Exit(0)
+		}
+	}()
 
 	// Configure ssh server
 	config := &ssh.ServerConfig{
