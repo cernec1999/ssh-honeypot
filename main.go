@@ -62,19 +62,24 @@ var availableContainers AvailableContainers
 // AvailableContainers describes a list of the container names to be
 // popped from.
 type AvailableContainers struct {
-	containerEvent     *semaphore.Weighted
-	containerNames     []string
-	containerNamesLock sync.Mutex
+	containerEvent *semaphore.Weighted
+	containerNames []string
 }
+
+// Create mutex for the shared progrma data
+var sharedProgramData sync.Mutex = sync.Mutex{}
 
 // Is the program still running?
 var programIsRunning bool = true
 
+// Current password attempt data
+var passwordData map[net.Addr]PasswordAttemptData
+
 // Function to ensure that there will always be at least NumContainers
 func spawnContainers() {
-	availableContainers.containerNamesLock.Lock()
+	sharedProgramData.Lock()
 	for programIsRunning {
-		availableContainers.containerNamesLock.Unlock()
+		sharedProgramData.Unlock()
 		// Acquire a semaphore so that only the max number of containers at
 		// any given time is only AvailableContainers
 		availableContainers.containerEvent.Acquire(context.Background(), 1)
@@ -84,16 +89,16 @@ func spawnContainers() {
 
 		if err != nil {
 			debugPrint(fmt.Sprintf("Error starting container: %v", err))
-			availableContainers.containerNamesLock.Lock()
+			sharedProgramData.Lock()
 			continue
 		}
 
 		// Lock the list and append the container name
-		availableContainers.containerNamesLock.Lock()
+		sharedProgramData.Lock()
 		availableContainers.containerNames = append(availableContainers.containerNames, str)
 	}
 
-	availableContainers.containerNamesLock.Unlock()
+	sharedProgramData.Unlock()
 
 }
 
@@ -134,7 +139,7 @@ func dialSSHClient(containerID string) (*ssh.Client, string, error) {
 		// Pop new connection, we know these are running
 		// TODO: We need to wait for a new container to come
 		// if the length of the array is 0 (data race)
-		availableContainers.containerNamesLock.Lock()
+		sharedProgramData.Lock()
 		if len(availableContainers.containerNames) != 0 {
 			conn = availableContainers.containerNames[0]
 			availableContainers.containerNames = availableContainers.containerNames[1:]
@@ -142,7 +147,7 @@ func dialSSHClient(containerID string) (*ssh.Client, string, error) {
 		} else {
 			return nil, "", errors.New("No container ready to be popped just yet")
 		}
-		availableContainers.containerNamesLock.Unlock()
+		sharedProgramData.Unlock()
 	}
 
 	// Get NAT'd port number
@@ -170,7 +175,7 @@ func dialSSHClient(containerID string) (*ssh.Client, string, error) {
 }
 
 // Serve a single SSH connection
-func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwords map[net.Addr]PasswordAttemptData) error {
+func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig) error {
 	serverConnection, serverChannels, serverRequests, err := ssh.NewServerConn(connection, sshConfig)
 
 	if err != nil {
@@ -205,6 +210,7 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 	}
 
 	// Stop the container after n seconds
+	// TODO: Check to see if the duration is valid before spawning any connection threads
 	dur, _ := time.ParseDuration(KeepAliveTime)
 
 	timer := time.AfterFunc(dur, func() {
@@ -212,8 +218,13 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 	})
 	defer timer.Stop()
 
+	sharedProgramData.Lock()
 	// Get the password data for that connection
-	pwdData := passwords[serverConnection.Conn.RemoteAddr()]
+	pwdData := passwordData[serverConnection.Conn.RemoteAddr()]
+
+	// Remove old password data
+	delete(passwordData, serverConnection.Conn.RemoteAddr())
+	sharedProgramData.Unlock()
 
 	port, err := strconv.ParseUint(strPort, 10, 16)
 
@@ -229,9 +240,6 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 
 	// Write debug
 	debugPrint(fmt.Sprintf("SSH connection authenticated for %s. Writing to database with ID %d.", host, sqlConn.ConnID))
-
-	// Remove old password data
-	delete(passwords, serverConnection.Conn.RemoteAddr())
 
 	// Close client connection on exit
 	defer clientConnection.Close()
@@ -344,7 +352,7 @@ func main() {
 	// TODO: is there a data race here? need to check if passwords is thread safe.
 	// Also probably want to find a better way to do this. Maybe create a list of
 	// activate connections here.
-	passwords := make(map[net.Addr]PasswordAttemptData)
+	passwordData = make(map[net.Addr]PasswordAttemptData)
 
 	// Create a channel list for the new containers
 	// availableContainers = make(chan string, NumContainers)
@@ -362,16 +370,16 @@ func main() {
 	signal.Notify(c, os.Interrupt)
 	go func() {
 		for range c {
-			availableContainers.containerNamesLock.Lock()
+			sharedProgramData.Lock()
 			programIsRunning = false
-			availableContainers.containerNamesLock.Unlock()
+			sharedProgramData.Unlock()
 
 			// Pull connections from the channel and kill them. At
 			// this point, we shouldn't have any more additions, only
 			// removals.
 		innerLoop:
 			for {
-				availableContainers.containerNamesLock.Lock()
+				sharedProgramData.Lock()
 
 				// Get container to remove and stop it
 				conn := availableContainers.containerNames[0]
@@ -380,12 +388,12 @@ func main() {
 
 				// If we popped the last one off, break
 				if len(availableContainers.containerNames) == 0 {
-					availableContainers.containerNamesLock.Unlock()
+					sharedProgramData.Unlock()
 					break innerLoop
 				}
 
 				// Unlock the mutex
-				availableContainers.containerNamesLock.Unlock()
+				sharedProgramData.Unlock()
 
 			}
 
@@ -401,6 +409,11 @@ func main() {
 	// Configure ssh server
 	config := &ssh.ServerConfig{
 		PasswordCallback: func(connMeta ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+			// Lock password data
+			sharedProgramData.Lock()
+
+			// Unlock when the program returns
+			defer sharedProgramData.Unlock()
 
 			debugPrint(fmt.Sprintf("SSH password attempt from %s.", connMeta.RemoteAddr()))
 			debugPrint(fmt.Sprintf("Username: %s", connMeta.User()))
@@ -410,7 +423,7 @@ func main() {
 			succeed := rand.Intn(3) == 0
 
 			// If we've not seen this connection before
-			if _, ok := passwords[connMeta.RemoteAddr()]; !ok {
+			if _, ok := passwordData[connMeta.RemoteAddr()]; !ok {
 				attemptsList := []UsernamePassword{}
 
 				attemptsList = append(attemptsList, UsernamePassword{
@@ -418,7 +431,7 @@ func main() {
 					password: string(password),
 				})
 
-				passwords[connMeta.RemoteAddr()] = PasswordAttemptData{
+				passwordData[connMeta.RemoteAddr()] = PasswordAttemptData{
 					usernamePasswords: attemptsList,
 					numAttempts:       1,
 				}
@@ -426,16 +439,16 @@ func main() {
 				if succeed {
 					return nil, nil
 				}
-			} else if passwords[connMeta.RemoteAddr()].numAttempts == 2 {
+			} else if passwordData[connMeta.RemoteAddr()].numAttempts == 2 {
 				// Get password list and append to it
-				pwdList := passwords[connMeta.RemoteAddr()].usernamePasswords
+				pwdList := passwordData[connMeta.RemoteAddr()].usernamePasswords
 				pwdList = append(pwdList, UsernamePassword{
 					username: connMeta.User(),
 					password: string(password),
 				})
 
 				// append password attempt
-				passwords[connMeta.RemoteAddr()] = PasswordAttemptData{
+				passwordData[connMeta.RemoteAddr()] = PasswordAttemptData{
 					usernamePasswords: pwdList,
 					numAttempts:       3,
 				}
@@ -444,16 +457,16 @@ func main() {
 				return nil, nil
 			} else {
 				// Get password list and append to it
-				pwdList := passwords[connMeta.RemoteAddr()].usernamePasswords
+				pwdList := passwordData[connMeta.RemoteAddr()].usernamePasswords
 				pwdList = append(pwdList, UsernamePassword{
 					username: connMeta.User(),
 					password: string(password),
 				})
 
 				// append password attempt
-				passwords[connMeta.RemoteAddr()] = PasswordAttemptData{
+				passwordData[connMeta.RemoteAddr()] = PasswordAttemptData{
 					usernamePasswords: pwdList,
-					numAttempts:       passwords[connMeta.RemoteAddr()].numAttempts + 1,
+					numAttempts:       passwordData[connMeta.RemoteAddr()].numAttempts + 1,
 				}
 
 				// we succeed
@@ -487,7 +500,7 @@ func main() {
 			continue
 		}
 
-		go serveSSHConnection(currentConnection, config, passwords)
+		go serveSSHConnection(currentConnection, config)
 	}
 }
 
