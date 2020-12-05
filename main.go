@@ -20,7 +20,7 @@ import (
 
 // PrivKeyLocation is the location of the private key to be used
 // in the ssh server
-const PrivKeyLocation string = "/Users/cernec1999/.ssh/id_rsa"
+const PrivKeyLocation string = "/home/ccerne/.ssh/id_rsa"
 
 // RemoteUsername is the username of the remote server
 const RemoteUsername string = "root"
@@ -32,7 +32,7 @@ const RemotePassword string = "root"
 const RemoteAddr string = "127.0.0.1"
 
 // ServerAddr is the address and port to bind to
-const ServerAddr string = "0.0.0.0:22"
+const ServerAddr string = "0.0.0.0:1337"
 
 // Dbg is if we are in debug mode
 const Dbg bool = true
@@ -72,7 +72,9 @@ var programIsRunning bool = true
 
 // Function to ensure that there will always be at least NumContainers
 func spawnContainers() {
+	availableContainers.containerNamesLock.Lock()
 	for programIsRunning {
+		availableContainers.containerNamesLock.Unlock()
 		// Acquire a semaphore so that only the max number of containers at
 		// any given time is only AvailableContainers
 		availableContainers.containerEvent.Acquire(context.Background(), 1)
@@ -82,14 +84,16 @@ func spawnContainers() {
 
 		if err != nil {
 			debugPrint(fmt.Sprintf("Error starting container: %v", err))
+			availableContainers.containerNamesLock.Lock()
 			continue
 		}
 
 		// Lock the list and append the container name
 		availableContainers.containerNamesLock.Lock()
 		availableContainers.containerNames = append(availableContainers.containerNames, str)
-		availableContainers.containerNamesLock.Unlock()
 	}
+
+	availableContainers.containerNamesLock.Unlock()
 
 }
 
@@ -128,10 +132,16 @@ func dialSSHClient(containerID string) (*ssh.Client, string, error) {
 		conn = containerID
 	} else {
 		// Pop new connection, we know these are running
+		// TODO: We need to wait for a new container to come
+		// if the length of the array is 0 (data race)
 		availableContainers.containerNamesLock.Lock()
-		conn = availableContainers.containerNames[0]
-		availableContainers.containerNames = availableContainers.containerNames[1:]
-		availableContainers.containerEvent.Release(1)
+		if len(availableContainers.containerNames) != 0 {
+			conn = availableContainers.containerNames[0]
+			availableContainers.containerNames = availableContainers.containerNames[1:]
+			availableContainers.containerEvent.Release(1)
+		} else {
+			return nil, "", errors.New("No container ready to be popped just yet")
+		}
 		availableContainers.containerNamesLock.Unlock()
 	}
 
@@ -349,7 +359,9 @@ func main() {
 	signal.Notify(c, os.Interrupt)
 	go func() {
 		for range c {
+			availableContainers.containerNamesLock.Lock()
 			programIsRunning = false
+			availableContainers.containerNamesLock.Unlock()
 
 			// Pull connections from the channel and kill them. At
 			// this point, we shouldn't have any more additions, only
