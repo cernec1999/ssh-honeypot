@@ -174,7 +174,7 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 	serverConnection, serverChannels, serverRequests, err := ssh.NewServerConn(connection, sshConfig)
 
 	if err != nil {
-		debugPrint("Could not initiate SSH handshake")
+		debugPrint(fmt.Sprintf("Could not initiate SSH handshake: %v", err))
 		return err
 	}
 
@@ -293,6 +293,9 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig, passwo
 				if req.WantReply {
 					req.Reply(b, nil)
 				}
+
+				// TODO: Implement req.Type exec, pty-req, etc.
+				// exec would be pretty important for logging
 
 				if req.Type == "exit-status" {
 					break threadLoop
