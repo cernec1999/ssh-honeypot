@@ -418,6 +418,9 @@ func main() {
 		}
 	}()
 
+	// Configure TOR IP addresses
+	err = SetupExitNodeMap()
+
 	// Configure ssh server
 	config := &ssh.ServerConfig{
 		PasswordCallback: func(connMeta ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
