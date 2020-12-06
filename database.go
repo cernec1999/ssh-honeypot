@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS connections (
 	continent TEXT NOT NULL,
 	country TEXT NOT NULL,
 	city TEXT NOT NULL,
+	is_tor integer NOT NULL,
 	attempts integer,
 	container TEXT NOT NULL
 );`
@@ -45,9 +46,10 @@ INSERT INTO connections (
 	continent,
 	country,
 	city,
+	is_tor,
 	attempts,
 	container
-) VALUES (?, ?, ?, ?, ?, ?, ?)`
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 
 const insertAttempt string = `
 INSERT INTO attempts (
@@ -213,7 +215,7 @@ func (sq *SQLHoneypotDBConnection) insertInitialConnection(sourceIP string, sour
 		return err
 	}
 
-	_, err = statement.Exec(sourceIP, sourcePort, geoData.ContinentCode, geoData.CountryCode, geoData.City, pwdData.numAttempts, container)
+	_, err = statement.Exec(sourceIP, sourcePort, geoData.ContinentCode, geoData.CountryCode, geoData.City, geoData.TorExitNode, pwdData.numAttempts, container)
 
 	if err != nil {
 		return err
