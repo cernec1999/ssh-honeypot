@@ -274,7 +274,7 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig) error 
 		// Create client connection
 		clientChannel, clientRequests, err := clientConnection.OpenChannel(newChannel.ChannelType(), newChannel.ExtraData())
 		if err != nil {
-			debugPrint(fmt.Sprintf("Could not accept client channel: %s", err.Error()))
+			debugPrint(fmt.Sprintf("Could not accept client channel: %v", err))
 			return err
 		}
 
@@ -306,7 +306,7 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig) error 
 
 				b, err := dst.SendRequest(req.Type, req.WantReply, req.Payload)
 				if err != nil {
-					debugPrint(fmt.Sprintf("Request sending did not work %s", err))
+					debugPrint(fmt.Sprintf("Request sending did not work %v", err))
 					return
 				}
 
