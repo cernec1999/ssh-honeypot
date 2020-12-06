@@ -176,18 +176,47 @@ func dialSSHClient(containerID string) (*ssh.Client, string, error) {
 
 // Serve a single SSH connection
 func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig) error {
-	serverConnection, serverChannels, serverRequests, err := ssh.NewServerConn(connection, sshConfig)
+	serverConnection, serverChannels, serverRequests, sshErr := ssh.NewServerConn(connection, sshConfig)
+
+	// Split address
+	host, strPort, err := net.SplitHostPort(connection.RemoteAddr().String())
+
+	// Parse port as an integer
+	port, err := strconv.ParseUint(strPort, 10, 16)
 
 	if err != nil {
-		debugPrint(fmt.Sprintf("Could not initiate SSH handshake: %v", err))
+		debugPrint(fmt.Sprintf("Could not parse port as an integer: %v", err))
+		return err
+	}
+
+	// Get geographical data
+	geoData := GetGeoData(host)
+
+	sharedProgramData.Lock()
+	// Get the password data for that connection
+	pwdData, ok := passwordData[connection.RemoteAddr()]
+
+	// Remove old password data
+	if ok {
+		delete(passwordData, connection.RemoteAddr())
+	} else {
+		pwdData = PasswordAttemptData{
+			numAttempts:       0,
+			usernamePasswords: []UsernamePassword{},
+		}
+	}
+	sharedProgramData.Unlock()
+
+	if sshErr != nil {
+		debugPrint(fmt.Sprintf("Could not initiate SSH handshake: %v", sshErr))
+		// Create SQL connection
+		sqlConn := NewSQLHoneypotDBConnection(host, uint16(port), geoData, pwdData, "")
+		sqlConn.Close()
 		return err
 	}
 
 	// Close connection when function returns
 	defer serverConnection.Close()
-
-	// Split address
-	host, strPort, err := net.SplitHostPort(serverConnection.Conn.RemoteAddr().String())
 
 	if err != nil {
 		debugPrint(fmt.Sprintf("Could not split host and port: %v", err))
@@ -217,23 +246,6 @@ func serveSSHConnection(connection net.Conn, sshConfig *ssh.ServerConfig) error 
 		StopContainer(containerID)
 	})
 	defer timer.Stop()
-
-	sharedProgramData.Lock()
-	// Get the password data for that connection
-	pwdData := passwordData[serverConnection.Conn.RemoteAddr()]
-
-	// Remove old password data
-	delete(passwordData, serverConnection.Conn.RemoteAddr())
-	sharedProgramData.Unlock()
-
-	port, err := strconv.ParseUint(strPort, 10, 16)
-
-	if err != nil {
-		debugPrint(fmt.Sprintf("Could not parse port as an integer: %v", err))
-		return err
-	}
-
-	geoData := GetGeoData(host)
 
 	// Create SQL connection
 	sqlConn := NewSQLHoneypotDBConnection(host, uint16(port), geoData, pwdData, containerID)
