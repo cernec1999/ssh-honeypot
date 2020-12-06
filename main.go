@@ -28,8 +28,8 @@ const RemoteUsername string = "root"
 // RemotePassword is the remote's password
 const RemotePassword string = "root"
 
-// RemoteAddr describes the remote server to connect to
-const RemoteAddr string = "127.0.0.1"
+// RemotePort is the remote's port
+const RemotePort uint16 = 22
 
 // ServerAddr is the address and port to bind to
 const ServerAddr string = "0.0.0.0:1337"
@@ -150,8 +150,8 @@ func dialSSHClient(containerID string) (*ssh.Client, string, error) {
 		sharedProgramData.Unlock()
 	}
 
-	// Get NAT'd port number
-	port, err := GetHostPort(conn)
+	// Get container IP
+	ip, err := GetContainerIP(conn)
 
 	if err != nil {
 		return nil, "", err
@@ -169,7 +169,7 @@ func dialSSHClient(containerID string) (*ssh.Client, string, error) {
 	clientConfig.HostKeyCallback = ssh.InsecureIgnoreHostKey()
 
 	// Finally, redirect to docker container
-	client, err := ssh.Dial("tcp", fmt.Sprintf("%s:%s", RemoteAddr, port), clientConfig)
+	client, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", ip, RemotePort), clientConfig)
 
 	return client, conn, err
 }
