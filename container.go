@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/docker/docker/api/types"
@@ -30,8 +29,8 @@ func IsSSHRunning(container string) (bool, error) {
 	return res.State.Health.Status == "healthy", nil
 }
 
-// GetHostPort returns the port of a container.
-func GetHostPort(container string) (string, error) {
+// GetContainerIP returns the port of a container.
+func GetContainerIP(container string) (string, error) {
 	cli, err := CreateConnection()
 
 	// Error handling
@@ -46,13 +45,7 @@ func GetHostPort(container string) (string, error) {
 		return "", err
 	}
 
-	for insidePort, hostPort := range res.NetworkSettings.Ports {
-		if insidePort.Int() == 22 {
-			return hostPort[0].HostPort, nil
-		}
-	}
-
-	return "", errors.New("Unable to find host port")
+	return res.NetworkSettings.Networks["no-internet"].IPAddress, nil
 }
 
 // StopContainer stops the container
@@ -131,16 +124,8 @@ func CreateAndStartNewContainer() (string, error) {
 			"22/tcp": struct{}{},
 		},
 	}, &container.HostConfig{
-		PortBindings: nat.PortMap{
-			"22/tcp": []nat.PortBinding{
-				{
-					HostIP:   "127.0.0.1",
-					HostPort: "",
-				},
-			},
-		},
-		// NetworkMode: "no-internet",
-		// TODO: create custom docker network?
+		// Should we make the user create a docker network?
+		NetworkMode: "no-internet",
 	}, nil, "")
 
 	// Return an error, if any
